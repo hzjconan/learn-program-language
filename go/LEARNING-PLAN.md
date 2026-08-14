@@ -1,0 +1,253 @@
+# Go 复习/进阶计划（3 周冲刺版）
+
+> 面向有 Java / TypeScript 经验、Go 荒废已久的开发者
+> 目标方向：**后端 Web / 微服务 API** + **云原生 / K8s 生态** + **扎实的语言基础**
+> 节奏：每天 3+ 小时 × 21 天 · 教学方式：讲解 → 出题 → 你写 → 我做 code review
+
+---
+
+## 0. 教学约定
+
+每天的流程固定为四步，请按这个节奏跟我配合：
+
+| 步骤 | 谁做 | 说明 |
+|---|---|---|
+| 1. 讲解 | 我 | 当天知识点 + **和 Java/TS 的差异点** + 常见坑（这部分是重点，你的旧经验既是助力也是陷阱） |
+| 2. 出题 | 我 | 1 道主练习 + 1~2 道小题，附带测试用例骨架 |
+| 3. 编码 | 你 | 自己写，卡住了随时问我，但先别看答案 |
+| 4. 评审 | 我 | 逐行 review：正确性、惯用法（idiomatic）、并发安全、性能。**这一步是真正涨功力的地方** |
+
+**给你的三条纪律：**
+1. 每道题写完先自己跑 `go vet ./...` 和 `go test -race ./...`，再交给我。
+2. 不要在心里把 Go 翻译成 Java。遇到"这在 Java 里是 XXX"的念头，把它写下来问我 —— 大部分情况下 Go 的答案是"不这么干"。
+3. 每天结束在 `NOTES.md` 里写 3 行：今天最反直觉的一点 / 踩的坑 / 还没搞懂的。
+
+---
+
+## 第 0 天：环境重建（约 1 小时，务必先做）
+
+当前状态诊断：
+
+- `go1.17.5 darwin/amd64`，而你的机器是 **arm64**。工具链跑在 Rosetta 转译层下，编译/测试速度腰斩。
+- 1.17 太老，以下全都用不了：泛型（1.18）、`log/slog` 结构化日志（1.21）、`min`/`max`/`clear` 内置函数（1.21）、`for range` 循环变量语义修正（1.22，**这个修掉了 Go 最著名的坑**）、`http.ServeMux` 路径参数路由（1.22）、`range over func` 迭代器（1.23）、`go.work` 工作区。
+- 这些不是可选糖，是现在写 Go 的默认姿势。学老版本等于学错。
+
+**任务：**
+1. 卸载旧的：`sudo rm -rf /usr/local/go`
+2. 从 https://go.dev/dl/ 下载 **darwin-arm64** 的 pkg 安装最新稳定版（1.26 或更新），安装后确认输出是 `darwin/arm64`
+3. 装编辑器：VS Code + `golang.go` 扩展（或 GoLand，你有 JetBrains 习惯的话）
+4. 装 `golangci-lint`（一站式静态检查，相当于 ESLint + SpotBugs）
+5. 在本目录初始化模块，验证跑通 hello world
+
+验收：`go version` 显示 arm64 + 最新版；`go test` 能跑。
+
+---
+
+## 第 1 周：语言核心 —— 把旧习惯拆掉
+
+> 本周主线：**Go 不是"简化版 Java"**。没有类、没有继承、没有异常、没有重载、没有构造函数。
+> 每天约 1.5h 讲解+阅读，1.5h 写代码。
+
+### D1 · 工程骨架与类型系统基础
+- module / package / import path，为什么 Go 没有 Maven 坐标却也能管依赖
+- 变量、`:=` 的作用域陷阱、**零值可用**哲学（对比 Java 的 `null` / TS 的 `undefined`）
+- 基本类型、显式类型转换（Go 没有隐式提升）、常量与 iota
+- 可见性靠首字母大小写，不是 `public`/`private`
+- **练习**：温度/单位换算库 + 表驱动测试，跑通 `go test`
+
+### D2 · 函数、错误处理、defer
+- 多返回值、命名返回值（以及为什么少用）
+- **错误即值**：`error` 接口、`errors.New` / `fmt.Errorf` + `%w` 包装、`errors.Is` / `errors.As`
+- 自定义错误类型；对比 Java checked exception 和 TS 的 `throw`
+- `defer` 的执行时机、参数求值时机、循环里 defer 的坑
+- `panic` / `recover` —— 什么时候**不该**用（90% 的情况）
+- **练习**：带分层错误包装的文件解析器，要求调用方能用 `errors.As` 拿到行号
+
+### D3 · slice / map / string —— Bug 高发区
+- 数组 vs 切片；`len` / `cap` / 底层数组共享
+- `append` 何时扩容、何时**不**扩容导致意外的别名修改（这是 Go 最常见的线上事故之一）
+- `copy`、切片三索引 `s[a:b:c]`
+- map 的无序遍历、不可寻址、并发写直接 panic
+- string 是不可变 byte 序列；`rune` vs `byte`；中文遍历的正确姿势
+- **练习**：实现一个不共享底层数组的 `Filter[T]`，用测试证明它不污染入参
+
+### D4 · struct、方法、组合
+- struct 定义、字面量、匿名/嵌入字段
+- 方法接收者：**值 vs 指针**（何时选哪个，Go 的一致性规则）
+- 嵌入 ≠ 继承：没有多态覆盖，只有方法提升
+- 构造惯例：`NewXxx` 函数，没有构造器
+- **练习**：把一段"Java 味"的继承层次（我提供）重构成 Go 的组合写法
+
+### D5 · interface 与泛型
+- **隐式实现**：接口由使用方定义，不是实现方声明（和 Java `implements` 的根本区别）
+- 小接口哲学：`io.Reader` / `io.Writer` / `error`
+- 类型断言、type switch、`any`
+- **nil interface != nil pointer** 的经典坑，必须彻底搞懂
+- 泛型：类型参数、约束、`comparable`；什么时候该用泛型，什么时候接口更好
+- **练习**：为一个数据源写可插拔抽象，用 interface 做依赖倒置 + 泛型工具函数
+
+### D6 · 测试与工程规范
+- `go test` / 表驱动测试 / 子测试 `t.Run` / `t.Cleanup`
+- `testing.B` 基准测试、`-race` 竞态检测、覆盖率
+- 项目布局：`cmd/` `internal/` `pkg/` 的真实含义（`internal` 是编译器强制的）
+- `go.mod` / `go.sum` / 版本选择 MVS / `go mod tidy` / vendor
+- `gofmt` 不可协商、`go vet`、`golangci-lint` 配置
+- **练习**：给前 5 天的代码补齐测试，覆盖率打到 80%+，并配好 lint
+
+### D7 · 周综合项目 + 复盘
+- **项目**：命令行日志分析工具（读取大文件 → 解析 → 聚合统计 → 多种格式输出）
+- 覆盖本周全部知识点，我做一次完整的 code review
+- 复盘：把你 `NOTES.md` 里的疑问集中解决
+
+---
+
+## 第 2 周：并发 + 服务端工程 —— 你的主战场
+
+> 本周主线：Go 最核心的竞争力。你的 Java 并发经验（线程池、`CompletableFuture`）和 JS 的 event loop 心智模型**都要调整**。
+
+### D8 · goroutine 与 channel
+- goroutine 是什么、为什么便宜（对比 Java 平台线程 / 虚拟线程）
+- channel：无缓冲 vs 有缓冲、方向类型、关闭语义、`for range` 读取
+- `select`、`default`、超时模式
+- 死锁、goroutine 泄漏的成因
+- **练习**：用 channel 实现一个有界并发的爬取器
+
+### D9 · sync、内存模型、竞态
+- `sync.Mutex` / `RWMutex` / `WaitGroup` / `Once` / `sync.Map` 各自的适用场景
+- `atomic` 包与泛型原子类型
+- `errgroup`：并发任务的错误传播（生产代码里最常用的并发工具）
+- Go 内存模型 & happens-before；`-race` 实战
+- **"不要用共享内存来通信"** 的真实含义与边界
+- **练习**：给一个故意有竞态的程序定位并修复，要求 `-race` 干净
+
+### D10 · context 与并发模式
+- `context.Context` 全套：取消、超时、截止时间、传值（以及为什么别拿它当 DI 容器）
+- 取消信号如何贯穿整条调用链
+- 经典模式：pipeline、fan-in/fan-out、worker pool、信号量限流、优雅退出
+- **练习**：可取消的多阶段 pipeline，主协程取消后所有 goroutine 必须干净退出（用测试验证无泄漏）
+
+### D11 · net/http 服务端
+- `http.Handler` / `HandlerFunc` / `ServeMux` 新版路由（`GET /items/{id}`）
+- 中间件模式（洋葱模型，和 Express/Koa 很像，你会秒懂）
+- 请求生命周期、`r.Context()`、超时的四个配置项（漏配就是线上事故）
+- 优雅关闭 `Shutdown`
+- 客户端：`http.Client` 复用、连接池、超时、重试
+- **练习**：手写一套中间件（日志 / 恢复 / 请求 ID / 限流），不用任何框架
+
+### D12 · JSON、配置、结构化日志、错误分层
+- `encoding/json` 的 tag、`omitempty`、自定义 `Marshaler`、数字精度坑
+- 配置管理（环境变量 + 文件），十二要素应用
+- **`log/slog`**：结构化日志、Handler、上下文属性（1.21 后的标准答案，别再用第三方了）
+- 分层错误设计：domain error → HTTP status 的映射
+- **练习**：给 D11 的服务加上配置、slog、统一错误响应
+
+### D13 · 数据库
+- `database/sql` 接口模型、连接池参数（`SetMaxOpenConns` 等）
+- 驱动选择：`pgx`（Postgres 首选）
+- 事务、`context` 超时、`sql.Null*` / 指针处理 NULL
+- 查询层方案对比：手写 SQL vs `sqlc`（代码生成，我推荐）vs `GORM`（ORM，Java 背景容易过度依赖，会讲清代价）
+- 数据库迁移工具
+- **练习**：给服务接上真实的 Postgres（Docker 起），实现 repository 层 + 事务
+
+### D14 · 周综合项目
+- **项目**：一个完整的 REST API 服务 —— 分层架构（handler / service / repository）、依赖注入（构造函数注入，不需要 Spring）、完整测试、Docker 化
+- 我做完整 code review：架构分层、错误处理、并发安全、可测试性
+
+---
+
+## 第 3 周：生产化 + 云原生
+
+### D15 · 测试进阶
+- `httptest` 测 handler、测 client
+- 依赖打桩：用接口做 fake（Go 社区不爱 mock 框架，会讲为什么）
+- `testcontainers-go`：真实数据库集成测试
+- Fuzz 测试、golden file 测试
+- **练习**：给 D14 项目补齐单测 + 集成测试，CI 里能一键跑
+
+### D16 · 可观测性
+- OpenTelemetry：trace / metric 接入
+- Prometheus 指标暴露、四个黄金信号
+- `net/http/pprof`：CPU / heap / goroutine profile 实操
+- **练习**：故意造一个 goroutine 泄漏和一个内存泄漏，用 pprof 抓出来
+
+### D17 · 性能与内存
+- 栈 vs 堆、**逃逸分析**（`-gcflags=-m` 实操）
+- GC 工作机制、`GOGC` / `GOMEMLIMIT`
+- `sync.Pool`、预分配、避免不必要的分配
+- benchmark 驱动优化：先测量，再优化
+- **练习**：给一段慢代码做优化，要求用 benchmark 数据证明提升
+
+### D18 · 构建与交付
+- 交叉编译、`ldflags` 注入版本信息、静态链接
+- 多阶段 Dockerfile → distroless / scratch 镜像（几 MB 的镜像，这是 Go 相对 JVM 的巨大优势）
+- `go generate`、Makefile / Taskfile
+- GitHub Actions CI 流水线
+- **练习**：把 D14 项目打成 < 20MB 的生产镜像 + 完整 CI
+
+### D19 · 云原生基础
+- 为什么 K8s 生态全是 Go：读懂它们的代码风格
+- `client-go`：clientset、informer、lister、workqueue 概念模型
+- CRD / controller / reconcile loop 的思想（**声明式 + 最终一致**，这是核心心智模型）
+- 阅读实战：带你读一段真实的 K8s controller 源码
+- **练习**：用 client-go 写一个集群资源巡检 CLI
+
+### D20 · 写一个 Operator
+- `kubebuilder` 脚手架、CRD 定义、reconciler 实现
+- 幂等性、错误重试、状态子资源
+- 本地 `kind` 集群跑起来
+- **练习**：实现一个简单但完整的 controller（比如自动给带特定注解的 Pod 注入 sidecar 配置，或管理一个自定义资源）
+
+### D21 · 收尾与后续路线
+- 最终项目完整评审
+- Go 惯用法总结清单（你个人的"避坑手册"）
+- 后续路线建议：gRPC / 消息队列 / 分布式系统 / 源码阅读清单
+- 推荐持续跟进的资源与社区
+
+---
+
+## 配套资源（按优先级）
+
+| 资源 | 用途 |
+|---|---|
+| [A Tour of Go](https://go.dev/tour/) | 第 0-1 天快速唤醒手感，2 小时刷完 |
+| [Effective Go](https://go.dev/doc/effective_go) | **必读**，Go 惯用法圣经 |
+| [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments) | 我 review 你代码时的依据，建议提前扫一遍 |
+| [Go by Example](https://gobyexample.com/) | 查语法的速查手册 |
+| 官方标准库文档 pkg.go.dev | 日常查阅，Go 的文档质量极高 |
+| 《Go 语言设计与实现》（draveness 在线免费） | 第 3 周深入运行时/GC 时配合看 |
+| Go Blog + 每个版本的 Release Notes | 了解语言演进 |
+
+---
+
+## 里程碑验收
+
+- **第 1 周末**：能不查资料写出符合惯用法的 Go 代码，`go vet` + lint 全绿
+- **第 2 周末**：能独立设计并实现一个带数据库的生产级 HTTP 服务
+- **第 3 周末**：能读懂 K8s 生态项目源码，能写出可部署的 controller
+
+---
+
+## 进度追踪
+
+- [x] D0 环境重建 —— go1.26.6 darwin/arm64 · golangci-lint v2.12.2 · `make check` 全绿
+- [ ] D1 工程骨架与类型系统
+- [ ] D2 函数与错误处理
+- [ ] D3 slice/map/string
+- [ ] D4 struct 与组合
+- [ ] D5 interface 与泛型
+- [ ] D6 测试与工程规范
+- [ ] D7 周综合项目：日志分析 CLI
+- [ ] D8 goroutine 与 channel
+- [ ] D9 sync 与竞态
+- [ ] D10 context 与并发模式
+- [ ] D11 net/http 服务端
+- [ ] D12 JSON/配置/slog
+- [ ] D13 数据库
+- [ ] D14 周综合项目：REST API 服务
+- [ ] D15 测试进阶
+- [ ] D16 可观测性
+- [ ] D17 性能与内存
+- [ ] D18 构建与交付
+- [ ] D19 云原生基础
+- [ ] D20 Operator 实战
+- [ ] D21 收尾与路线规划

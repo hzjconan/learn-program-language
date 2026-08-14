@@ -1,0 +1,21 @@
+# 编译产物
+# Go 编译出的是无扩展名的二进制，容易误提交，所以统一输出到 bin/
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# `go test -c` 编译出的测试二进制
+*.test
+
+# 覆盖率报告（make cover 生成）
+*.out
+coverage.html
+
+# pprof 采样文件（第 3 周会用到）
+*.prof
+
+# go.work 是本地工作区配置，因人而异，不入库
+go.work
+go.work.sum

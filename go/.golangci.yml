@@ -1,0 +1,48 @@
+# golangci-lint 配置（schema v2）
+# 定位：学习期的"严师"。规则比多数生产项目略严，目的是让工具替我抓惯用法问题，
+# 这样我们的 code review 可以聚焦在设计和并发上，而不是纠格式。
+version: "2"
+
+linters:
+  # standard = errcheck + govet + ineffassign + staticcheck + unused
+  default: standard
+  enable:
+    - bodyclose       # HTTP response body 忘记 Close（goroutine/连接泄漏的头号成因）
+    - copyloopvar     # 检出 1.22 后已无必要的 `i := i` 影子变量写法
+    - errorlint       # 错误比较/包装用法：该用 errors.Is 的地方别用 ==
+    - gocritic        # 一组惯用法与性能建议
+    - misspell        # 英文拼写
+    - nilerr          # err != nil 却 return nil 这类逻辑反转
+    - noctx           # 发 HTTP 请求不带 context
+    - revive          # golint 的继任者，命名与风格规范
+    - unconvert       # 多余的类型转换
+
+  settings:
+    errcheck:
+      # 未检查的错误返回值是 Go 最常见的缺陷来源，这里要求严格
+      check-type-assertions: true
+      check-blank: true
+    revive:
+      rules:
+        - name: exported          # 导出标识符必须有文档注释
+        - name: error-return      # error 必须是最后一个返回值
+        - name: error-naming      # 错误变量命名 ErrXxx
+        - name: var-naming        # camelCase，缩写全大写（URL 不是 Url）
+        - name: indent-error-flow # if/else 里的 error 分支应提前 return
+
+  exclusions:
+    rules:
+      # 测试文件里放宽：允许忽略错误返回，不强制文档注释
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/hzjconan/learn-program-language/go
