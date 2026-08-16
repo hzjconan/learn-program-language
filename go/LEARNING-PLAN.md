@@ -58,13 +58,15 @@
 - **练习**：温度/单位换算库 + 表驱动测试，跑通 `go test`
 - 📖 讲解：[`lessons/D1.md`](lessons/D1.md) · 💻 练习：`internal/units/`
 
-### D2 · 函数、错误处理、defer
+### D2 · 函数、指针、错误处理、defer
 - 多返回值、命名返回值（以及为什么少用）
+- **指针基础**：`*` / `&`、Go 永远传值、struct 赋值是拷贝、slice/map/chan 的真相
 - **错误即值**：`error` 接口、`errors.New` / `fmt.Errorf` + `%w` 包装、`errors.Is` / `errors.As`
 - 自定义错误类型；对比 Java checked exception 和 TS 的 `throw`
 - `defer` 的执行时机、参数求值时机、循环里 defer 的坑
 - `panic` / `recover` —— 什么时候**不该**用（90% 的情况）
 - **练习**：带分层错误包装的文件解析器，要求调用方能用 `errors.As` 拿到行号
+- 📖 讲解：[`lessons/D2.md`](lessons/D2.md) · 💻 练习：`internal/kvconf/`、`internal/mathx/` · 🔬 `go run ./cmd/ptrdemo`
 
 ### D3 · slice / map / string —— Bug 高发区
 - 数组 vs 切片；`len` / `cap` / 底层数组共享
@@ -76,7 +78,7 @@
 
 ### D4 · struct、方法、组合
 - struct 定义、字面量、匿名/嵌入字段
-- 方法接收者：**值 vs 指针**（何时选哪个，Go 的一致性规则）
+- 方法接收者：**值 vs 指针**（何时选哪个，Go 的一致性规则）—— 在 D2 §2 指针基础上深化
 - 嵌入 ≠ 继承：没有多态覆盖，只有方法提升
 - 构造惯例：`NewXxx` 函数，没有构造器
 - **练习**：把一段"Java 味"的继承层次（我提供）重构成 Go 的组合写法
@@ -200,8 +202,15 @@
 - 本地 `kind` 集群跑起来
 - **练习**：实现一个简单但完整的 controller（比如自动给带特定注解的 Pod 注入 sidecar 配置，或管理一个自定义资源）
 
-### D21 · 收尾与后续路线
+### D21 · 收尾、面试模拟与后续路线
 - 最终项目完整评审
+- **面试模拟**：我出题你答，覆盖高频考点，答完逐题点评（哪句话会让面试官追问、哪句话暴露了理解不牢）
+  - 语言机制：slice 扩容与别名、map 并发、`defer` 求值时机、值/指针接收者、nil interface != nil pointer、逃逸分析
+  - 并发：GMP 调度模型、channel 底层、`select` 随机性、context 取消传播、常见死锁与泄漏、`sync.Map` 适用场景
+  - 运行时：GC 三色标记与写屏障、`GOGC`/`GOMEMLIMIT`、内存逃逸判断
+  - 工程：错误处理设计、依赖注入、如何测不可测的代码、性能排查流程
+  - 场景题：给一段有 bug 的并发代码让你找问题（这类题最能区分水平）
+  - 反向准备：面试官问「你有什么问题」时该问什么
 - Go 惯用法总结清单（你个人的"避坑手册"）
 - 后续路线建议：gRPC / 消息队列 / 分布式系统 / 源码阅读清单
 - 推荐持续跟进的资源与社区
@@ -234,7 +243,7 @@
 
 - [x] D0 环境重建 —— go1.26.6 darwin/arm64 · golangci-lint v2.12.2 · `make check` 全绿
 - [x] D1 工程骨架与类型系统 —— `internal/units` 温度/数据量换算 · 具名类型 + iota + 表驱动测试 · `make check` 全绿
-- [ ] D2 函数与错误处理
+- [x] D2 函数、指针、错误处理、defer —— `internal/kvconf` 带行号的配置解析器 + `internal/mathx` recover 练习 · `make check` 全绿
 - [ ] D3 slice/map/string
 - [ ] D4 struct 与组合
 - [ ] D5 interface 与泛型
@@ -253,4 +262,4 @@
 - [ ] D18 构建与交付
 - [ ] D19 云原生基础
 - [ ] D20 Operator 实战
-- [ ] D21 收尾与路线规划
+- [ ] D21 收尾、面试模拟与路线规划

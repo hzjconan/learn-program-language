@@ -14,6 +14,10 @@
 | [3](#3-为什么单位表不能写成-const) | 为什么单位表不能写成 `const` | 类型 |
 | [4](#4-包级声明的先后顺序有要求吗) | 包级声明的先后顺序有要求吗 | 语法 |
 | [5](#5-fmt-的格式化动词速查) | `fmt` 的格式化动词速查 | 标准库 |
+| [6](#6-传指针给函数传的是指针本身还是拷贝) | 传指针给函数，传的是指针本身还是拷贝 | 指针 |
+| [7](#7-slice--map-传参到底共享了什么) | slice / map 传参到底共享了什么 | 指针 |
+| [8](#8-errorsis-比较的是内存地址吗) | `errors.Is` 比较的是内存地址吗 | 错误处理 |
+| [9](#9--和--的区别为什么-_--会报错) | `:=` 和 `=` 的区别，为什么 `_ :=` 会报错 | 语法 |
 
 ---
 
@@ -174,3 +178,209 @@ fmt.Sprintf("%05d", 42)         // "00042"        补零
 1. **`go vet` 会检查 printf 参数匹配** —— 动词和参数类型对不上、数量不对，它都报错。写错不会静默出问题，`make check` 就拦下了。这是相对 Java 的实打实优势：`String.format` 的错误要到运行时才炸。
 
 2. **完整清单一条命令**：`go doc fmt` —— 包文档开头就是完整动词表，比搜索快，且是本地这个版本的准确文档。
+
+---
+
+## 6. 传指针给函数，传的是指针本身还是拷贝
+
+**拷贝。Go 永远传值，没有例外。**
+
+传 `x := &user` 时，函数收到的是**一个新的 8 字节变量，里面装着同一个地址**。
+
+```go
+func modifyPointee(u *User)   { u.Name = "改了" }         // 改【指向的对象】→ 调用方可见 ✅
+func reassignPointer(u *User) { u = &User{Name: "换了"} } // 改【指针本身】→ 调用方看不见 ❌
+```
+
+> **拷贝的是指针，不是指针指向的东西。**
+> 能透过它改远端数据，但改不了调用方手里那根「指针」本身。
+
+**和 Java 完全一致**——Java 也是永远传值，传对象时传的是「引用的拷贝」。Go 只是把 `*` 明写出来了。
+
+### 推论：为什么标准库老要你传 `&`
+
+```go
+errors.As(err, &pe)          // pe 已是 *ParseError，这里传 **ParseError
+json.Unmarshal(data, &cfg)
+fmt.Sscanf(s, "%d", &n)
+```
+
+因为这些函数**要写回给你**。既然只有值传递，想改调用方的变量就必须拿到那个变量的地址。
+
+**看到标准库要求 `&`，一律是「它要写回给你」。**
+
+> 可运行验证：`go run ./cmd/ptrdemo`（源码 `cmd/ptrdemo/main.go`）。
+> 盯地址那一列：函数内部赋值后地址确实变了，返回后调用方的没变 —— 证明改的不是同一个变量。
+
+---
+
+## 7. slice / map 传参到底共享了什么
+
+常听到的「slice、map、chan 是引用类型」**是个偷懒的说法**。精确的说法是：
+
+> Go 永远传值。它们只是**值本身里面就含了一个指针**。
+
+**map / chan**：变量本身**就是**一个指针（`*hmap` / `*hchan`）。拷贝它 = 拷贝一个地址，两边指向同一份数据，所以函数里的写入调用方全都看得见。
+
+**slice**：变量是个**三字段 struct**，传参时整个被拷贝：
+
+```
+[ 指向底层数组的指针 | len | cap ]     ← 24 字节
+```
+
+指针字段指向同一个底层数组 → **改元素可见**；但 `len`/`cap` 是独立副本 → **改长度不可见**：
+
+```
+函数里 s[0]=999:   [999 2 3]      ← 可见
+函数里 append:     [999 2 3]      ← 不可见！
+```
+
+`append` 一定会改 `len`，而 `len` 只存在于函数里那份拷贝中。
+
+> **这就是为什么 `s = append(s, x)` 的赋值不能省** —— append 返回新的 slice header，必须自己接住。
+
+### 什么时候需要 `*[]T`
+
+只有一种：函数要改变调用方的 slice header 本身（append / 重新切片 / 置 nil）。但**惯用做法是返回新 slice，不传 `*[]T`**：
+
+```go
+func appendAll(s []int, vals ...int) []int { return append(s, vals...) }
+s = appendAll(s, 4, 5)
+```
+
+标准库全是这个形状（`append`、`strconv.AppendInt`、`slices.Delete`）。看到 `*[]T` 出现在 API 里，八成设计味道不对。`*map[k]v` 更是纯噪音——那是在指针上再套指针。
+
+### 一张表
+
+| 类型 | 传参时拷贝了什么 | 改元素可见？ | 改长度可见？ |
+|---|---|---|---|
+| `int` / `struct` / `[3]int` | 整个值 | — / ❌ | — |
+| `*T` | 8 字节地址 | ✅（改 `*p`） | — |
+| `map` / `chan` | 8 字节地址 | ✅ | ✅ |
+| `[]T` | 24 字节 header | ✅ | ❌ |
+
+**唯一需要单独记的就是最后一行那个 ❌。** 其余都能从「永远传值」推出来。
+
+---
+
+## 8. `errors.Is` 比较的是内存地址吗
+
+**不一定。核心那一步是 `err == target`——【接口相等】，而接口相等 = 动态类型相同 且 动态值相等。**
+
+「动态值怎么比」取决于类型：
+
+| 错误的动态类型 | `==` 实际在比 |
+|---|---|
+| `*errorString`、`*MyError`（**指针**） | **地址** |
+| `MyError`（**struct 值**） | **逐字段比较** |
+| `syscall.Errno`（底层 `uintptr`） | **数值** |
+
+「比地址」只是最常见的那种，因为 `errors.New` 和多数自定义错误类型都用指针。
+
+```go
+type CodeError struct{ Code int }
+func (e CodeError) Error() string { return fmt.Sprintf("code %d", e.Code) }
+
+a, b := CodeError{404}, CodeError{404}
+&a == &b            // false —— 两个不同的变量
+errors.Is(a, b)     // true  —— 但字段相同，接口相等成立
+```
+
+### 完整算法
+
+```go
+for {
+    // ① 如果 target 可比较，试直接相等
+    if isComparable && err == target { return true }
+
+    // ② 如果 err 自己实现了 Is 方法，问它
+    if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(target) { return true }
+
+    // ③ 顺着 Unwrap 往下一层，回到 ①
+    err = errors.Unwrap(err)
+    if err == nil { return false }
+}
+```
+
+- **`isComparable` 守卫是必要的**：如果 `target` 的类型不可比较（比如 struct 含 slice 字段），`==` 会直接 panic，所以先用反射检查。
+- **第 ② 步是逃生舱**：任何错误类型都能实现 `Is(error) bool` 自定义「什么算匹配」，完全绕开值比较。
+- 每一层都同时试 ① 和 ②，所以包了五层照样匹配。
+
+### 精髓在第 ② 步：`fs.ErrNotExist` 的跨平台映射
+
+```go
+_, err := os.Open("/不存在")
+// 错误链：*fs.PathError →(Unwrap)→ syscall.Errno(2)
+
+pe.Err == fs.ErrNotExist          // false —— 类型和地址都不同
+errors.Is(err, fs.ErrNotExist)    // true
+```
+
+链底是个**操作系统错误码**，和 `fs.ErrNotExist` 这个包级变量毫无关系。能匹配上是因为 `syscall.Errno` 实现了 `Is`：
+
+```go
+func (e Errno) Is(target error) bool {
+	switch target {
+	case fs.ErrNotExist:   return e == ENOENT
+	case fs.ErrPermission: return e == EACCES || e == EPERM
+	case fs.ErrExist:      return e == EEXIST || e == ENOTEMPTY
+	}
+	return false
+}
+```
+
+**这是 Go 做跨平台错误抽象的机制**：各平台的 errno 数值体系完全不同，各自实现 `Is` 映射到同一组 `fs.Err*` 哨兵，于是 `errors.Is(err, fs.ErrNotExist)` 在哪都对。
+
+### 设计启示
+
+值类型的错误会被「字段相同即相等」——对 `CodeError` 这种**分类标签**语义正合适；但对携带位置信息的 `*ParseError` 就不对了，第 3 行和第 3 行的两个不同失败不该被当成同一个。
+
+> **指针接收者给你【身份】语义，值接收者给你【相等】语义。**
+> 错误类型几乎总是用指针接收者，除非它就是个纯粹的分类标签。
+
+---
+
+## 9. `:=` 和 `=` 的区别，为什么 `_ :=` 会报错
+
+| | `:=` | `=` |
+|---|---|---|
+| 作用 | **声明** + 初始化 | 纯**赋值** |
+| 变量必须已存在？ | 不能全都已存在 | 必须已存在 |
+| 能写类型吗 | 不能（靠推断） | 不适用 |
+| 函数外能用吗 | **不能** | 不能（包级只能 `var`） |
+
+### 为什么 `_ :=` 报错
+
+```go
+_ := f.Close()   // ❌ no new variables on left side of :=
+_ = f.Close()    // ✅
+```
+
+`:=` 的硬规则是「**左边至少要有一个新变量**」。而 `_` **不声明任何变量**——它是空白标识符，是「把值扔掉」的语法，不是变量名。所以 `_ :=` 左边一个新变量都没有。
+
+对照着看就清楚了：
+
+```go
+a, err := f()    // ✅ a、err 都是新的
+b, err := g()    // ✅ b 是新的，err 是【赋值】—— 至少有一个新的，合法
+_,  err := h()   // ✅ err 是新的就合法
+_, _ := h()      // ❌ 一个新变量都没有
+_ = x            // ✅ 纯赋值，永远合法
+```
+
+第二行那条规则很重要：**它让「每次调用都写 `err`」变得可行**，是 Go 错误处理能忍受的前提。
+
+### 顺带：`:=` 的作用域陷阱
+
+换一层作用域，`:=` 一定创建**新变量**，哪怕同名（变量遮蔽）：
+
+```go
+err := step1()
+if cond {
+    err := step2()      // ← 新变量，只活在 if 块里
+    if err != nil { log.Println(err) }
+}
+return err              // ← 返回的是外层那个 err，错误被吞了
+```
+
+Java 不允许局部变量遮蔽外层局部变量，编译不过；**Go 编译器对此完全沉默**。写 `:=` 在 if / for 内部之前，先问一句「外面有同名的吗」。
