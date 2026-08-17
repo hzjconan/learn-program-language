@@ -92,6 +92,7 @@
 - **nil interface != nil pointer** 的经典坑，必须彻底搞懂
 - 泛型：类型参数、约束、`comparable`；什么时候该用泛型，什么时候接口更好
 - **练习**：为一个数据源写可插拔抽象，用 interface 做依赖倒置 + 泛型工具函数
+- 📖 讲解：[`lessons/D5.md`](lessons/D5.md) · 💻 练习：`internal/store/`、`internal/genx/` · 🔬 `go run ./cmd/ifacedemo`
 
 ### D6 · 测试与工程规范
 - `go test` / 表驱动测试 / 子测试 `t.Run` / `t.Cleanup`
@@ -248,7 +249,7 @@
 - [x] D2 函数、指针、错误处理、defer —— `internal/kvconf` 带行号的配置解析器 + `internal/mathx` recover 练习 · `make check` 全绿
 - [x] D3 slice/map/string —— `internal/slicex` 不共享底层数组的切片工具 + `internal/stringx` 按 rune 的字符串处理 · `make check` 全绿
 - [x] D4 struct 与组合 —— `internal/payroll` 用接口+嵌入重构 Java 继承层次 · `cmd/embeddemo` 方法集/嵌入无多态演示 · `make check` 全绿
-- [ ] D5 interface 与泛型
+- [x] D5 interface 与泛型 —— `internal/store` 可插拔数据源（小接口 + 依赖倒置 + nil 接口坑）+ `internal/genx` 泛型工具 · `cmd/ifacedemo` 接口二元组演示 · `make check` 全绿
 - [ ] D6 测试与工程规范
 - [ ] D7 周综合项目：日志分析 CLI
 - [ ] D8 goroutine 与 channel

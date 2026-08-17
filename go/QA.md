@@ -21,6 +21,7 @@
 | [10](#10-栈堆和逃逸分析是什么) | 栈、堆和「逃逸分析」是什么 | 运行时 |
 | [11](#11-go-怎么表示集合set为什么是-mapkstruct) | Go 怎么表示集合（set）？为什么是 `map[K]struct{}` | 类型 |
 | [12](#12-预分配的-cap-会不会白占内存slicesclip) | 预分配的 cap 会不会白占内存？`slices.Clip` | 切片 |
+| [13](#13-一个-nil-指针装进-error-接口后为什么就不是-nil-了) | 一个 nil 指针，装进 `error` 接口后为什么就不是 nil 了 | 接口 |
 
 ---
 
@@ -587,3 +588,176 @@ return slices.Clone(out)    // 新分配一块刚好大小的内存，老的可�
 | 要把内部切片返回给外部，防止对方 append 踩你 | `out[:len:len]` 或 `slices.Clip` |
 
 **默认什么都不做。** 为一个临时结果多拷贝一次不划算，知道有这个选项就行。
+
+---
+
+## 13. 一个 nil 指针，装进 error 接口后为什么就不是 nil 了
+
+**一句话**：`nil` 指针本身没有接口，接口是在**赋值/return 的那一刻**才产生的；装箱时编译器把「表达式的静态类型」填进接口的类型格，**不管值是不是 nil**，于是接口就非 nil 了。
+
+### 现象
+
+```go
+type MyErr struct{}
+func (e *MyErr) Error() string { return "boom" }
+
+func f() error {
+	var e *MyErr    // nil 指针
+	return e
+}
+
+f() == nil          // false  ⚠️
+fmt.Println(f())    // boom   ← 打印结果完全不可信，见下面「怎么调试」
+```
+
+调用方的 `if err != nil` 会成立，然后去处理一个**根本不存在的错误**。
+
+### 装箱发生在哪一行
+
+```go
+func f() error {          // ← 返回类型是 error，这是个【接口】
+	var e *MyErr          // ① e 就是个 *MyErr 指针，值 = nil。此处【没有接口】
+	return e              // ② 隐式转换：装箱 ← 坑在这一行
+}
+```
+
+```
+        e （*MyErr 类型的变量）
+        └── 值：nil
+                │
+                │  return e  ── 装进 error 接口
+                ↓
+        接口值 = ( 类型: *MyErr , 值: nil )
+                    ↑              ↑
+                 从【静态类型】填    从【变量的值】填
+                 编译期定死，永远非空   这里是 nil
+```
+
+最能说明问题的一段——**同一个变量，比较结果相反**：
+
+```go
+var e *MyErr
+fmt.Println(e == nil)        // true    ← 指针比较
+
+var err error = e            // 装箱
+fmt.Println(err == nil)      // false   ← 接口比较。e 一点没变，变的是拿什么去比
+```
+
+### 四种状态
+
+| 表达式 | 类型格 | 值格 | `== nil` |
+|---|---|---|---|
+| `var e *MyErr` | —（不是接口，就一个指针） | nil | ✅ true |
+| `var err error` | nil | nil | ✅ true |
+| `var err error = e` | **`*MyErr`** | nil | ❌ **false** |
+| `var err error = &MyErr{}` | `*MyErr` | `0x...` | ❌ false |
+
+第 1 行和第 3 行装的是同一个 nil，结论却相反。
+
+### 会发生隐式装箱的位置
+
+都是同一件事，只是语法不同：
+
+| 写法 | 装箱时机 |
+|---|---|
+| `return e`（返回类型是接口） | return 那一行 |
+| `var err error = e` | 赋值那一行 |
+| `f(e)`（形参是接口） | 传参那一刻 |
+| `[]error{e}` / `map[string]error{...}` | 构造字面量时 |
+| `ch <- e`（chan 元素是接口） | 发送时 |
+
+### 为什么 Java 没有这个坑
+
+```java
+MyErr e = null;
+Exception err = e;                 // err 就是 null
+System.out.println(err == null);   // true
+```
+
+Java 的引用变量**只存一个地址**，null 就是 null，赋给谁都还是 null——类型信息长在对象自己身上，对象不存在就没有类型信息。
+
+Go 的接口值是**两个字长**（类型描述符 + 数据指针），类型格由编译器按静态类型填死，**哪怕数据格是 nil 也照填**。所以「空指针」和「空接口」在 Go 里是两个不同的状态。
+
+TS 也没有这个坑，因为 TS 的接口是编译期擦除的，运行时根本不存在。**Go 的接口在运行时是有实体的**，这是根因。
+
+### 两条避免规则
+
+**① 函数返回值类型写 `error`，别写具体错误类型。**
+
+```go
+func Validate(r Record) *ValidationError   // ❌ 埋雷：调用方一转成 error 就中招
+func Validate(r Record) error              // ✅
+```
+
+**② 中间变量是具体类型时，别写 `return f()`，先判断再 return。**
+
+```go
+// ❌
+func Save(r Record) error {
+	return Validate(r)          // 合法时返回的也不是 nil
+}
+
+// ✅
+func Save(r Record) error {
+	if verr := Validate(r); verr != nil {   // 这里是【指针比较】，正确
+		return verr                          // 只在真非 nil 时才装箱
+	}
+	return nil                               // 显式返回 nil 接口 (nil, nil)
+}
+```
+
+> 变量名别叫 `err`。叫 `verr` 或 `vErr`，提醒读者「它是具体类型，不是 error」。
+
+### 怎么调试
+
+**先破除一个误解**（我第一版写错过）：typed nil 的 error 打印出来**不一定**是 `<nil>`。`fmt` 遇到 error 会**调用它的 `Error()` 方法**，结果取决于这个方法碰没碰接收者——实测：
+
+```go
+type A struct{ Code int }
+func (e *A) Error() string { return "boom" }                          // 不碰接收者
+
+type B struct{ Code int }
+func (e *B) Error() string { return fmt.Sprintf("code=%d", e.Code) }  // 解引用了
+```
+
+```
+var errA error = (*A)(nil)   →  fmt.Println(errA) 打出  boom     ← 方法正常返回了
+var errB error = (*B)(nil)   →  fmt.Println(errB) 打出  <nil>    ← 方法 panic，被 fmt 兜住了
+```
+
+`errB` 那个 `<nil>` 是 `fmt` 内部的兜底：`Error()` 在 nil 接收者上解引用会 panic，`fmt` 捕获后发现实参是 nil 指针，于是打了 `<nil>`。**它不表示「值是 nil」。**
+
+所以日志里你可能看到 `boom`、`<nil>`、或 `%!v(PANIC=...)`——**三种都不告诉你这个 error 其实非 nil**。
+
+**唯一可信的是 `%T` 和 `== nil`：**
+
+```go
+fmt.Printf("%v %T %v\n", err, err, err == nil)
+// boom *main.A false      ← 只有中间那格能说明问题
+```
+
+### 工具能兜住一部分
+
+`golangci-lint`（staticcheck）会报：
+
+```
+SA4023: f never returns a nil interface value
+SA4023: this comparison is never true
+```
+
+但**只在它能静态推导出「永远非 nil」时才报**。中间隔几层函数调用、或者具体类型来自另一个包时就看不出来了。规则还是要记在脑子里。
+
+### ⚠️ 二阶陷阱：`errors.As` 会返回 true，然后给你一个 nil
+
+实测过：
+
+```go
+var v *VErr
+var err error = v          // typed nil
+
+var target *VErr
+errors.As(err, &target)    // → true！target 被赋成了 nil
+target.Field               // → panic: nil pointer dereference
+```
+
+`errors.As` 只按**类型**匹配，类型是对得上的。所以「`errors.As` 返回 true」不等于「拿到了可用的对象」。这进一步说明：**typed nil 必须在源头掐掉**，别指望下游的错误处理帮你兜。

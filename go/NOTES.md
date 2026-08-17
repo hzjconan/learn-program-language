@@ -405,3 +405,214 @@ p.Inc()   // ❌ panic —— 必须先解引用才能拷贝，nil 解不出东�
 - 反直觉：
 - 踩的坑：
 - 没搞懂：
+
+---
+
+## D5 · interface 与泛型（2026-08-17）
+
+讲解见 `lessons/D5.md`，练习在 `internal/store/`（主）和 `internal/genx/`（副）。
+先跑 `go run ./cmd/ifacedemo`，第 ④ 段是题眼。
+
+**小题 A · 接口值与泛型约束谜题**
+
+四段代码，**先不要跑**，用脑子推。
+
+```go
+// ① nil 接口
+type MyErr struct{}
+func (e *MyErr) Error() string { return "boom" }
+
+func f() error { var e *MyErr; return e }
+func g() error { return nil }
+
+func a() {
+	fmt.Println(f() == nil, g() == nil)
+	fmt.Println(f())
+}
+
+// ② type switch 的匹配顺序
+func kind(v any) string {
+	switch v.(type) {
+	case error:
+		return "error"
+	case *MyErr:
+		return "*MyErr"
+	default:
+		return "other"
+	}
+}
+
+func b() {
+	fmt.Println(kind(&MyErr{}))
+	fmt.Println(kind(nil))
+	fmt.Println(kind(42))
+}
+
+// ③ 约束里的波浪号
+type MyInt int
+func SumA[T int | float64](s []T) T  { ... }
+func SumB[T ~int | ~float64](s []T) T { ... }
+
+func c() {
+	SumA([]int{1, 2})     // (1)
+	SumA([]MyInt{1, 2})   // (2)
+	SumB([]MyInt{1, 2})   // (3)
+}
+
+// ④ comparable 能挡住什么
+func Uniq[T comparable](s []T) int { m := map[T]struct{}{}; for _, v := range s { m[v] = struct{}{} }; return len(m) }
+
+func d() {
+	fmt.Println(Uniq([]any{1, "a", 1}))   // (1)
+	fmt.Println(Uniq([]any{[]int{1}}))    // (2)
+}
+```
+
+我的答案：
+
+```
+① 第一行 = false, true
+   第二行 = <*MyErr, nil>
+
+② kind(&MyErr{}) =  *MyErr          kind(nil) =    other        kind(42) = other
+
+③ 编译不过的是：(  (2)      )
+
+④ (1) = 2               (2) = 1
+```
+
+为什么（① 请说清楚「为什么 f() 不等于 nil，但打印出来是 <nil>」）：
+①
+**f**里面定义了一个指向**MyErr**类型的指针，但还当前还没有指向任何实例，所以它本身是nil。
+在**return e**的时候，因为**f**本身定义的返回类型是**error**，是个接口，所以go会在这里做一次
+装箱操作，实际返回<*MyErr, nil>，所以**f() != nil**。**g**因为写死的就是返回**nil**，所以**g() == nil**。
+
+②
+**kind(&MyErr{})**里面的参数实际类型是指向**MyErr**的指针，所以走到了**case *MyErr**里。
+nil和42不在任何一个case里，所以走了default分支
+
+③
+**SumA**定义的范型参数是严格的**int**或者**float64**，所以传入**MyInt**类型会出错。
+**SumB**定义的范型参数的时候用了波浪线～, 说明可以接受任何底层实际类型是**int**或者**float64**的东西，所以可以传入**MyInt**类型。
+
+④
+第一个**Uniq**调用，传进去的是一个值是**1, a, 1**的数组，所以去重后长度是2。
+第二个**Uniq**调用，传进去的是一个值是[1]的数组，值本身是一个数组，但只有这一个值，所以长度是1。
+
+
+实际跑完的验证结果（对了/错在哪）：
+
+**① 第一行 ✅ `false, true`**，解释也完全对（装箱、静态类型都说到了）。
+
+**① 第二行 ❌**：我答的 `<*MyErr, nil>` 是接口**内部的状态**，不是 `fmt.Println` **打印出来的东西**。
+实测打印的是 **`boom`**。
+
+原因（Claude 第一版讲义在这里也写错了，一起纠正）：**`fmt` 遇到 error 会调用它的
+`Error()` 方法**，打印结果取决于这个方法碰没碰接收者：
+
+```
+type A struct{...}; func (e *A) Error() string { return "boom" }                    // 不碰接收者
+type B struct{...}; func (e *B) Error() string { return fmt.Sprintf(..., e.Code) }  // 解引用了
+
+var errA error = (*A)(nil)  →  fmt.Println(errA) 打出  boom    ← 方法正常返回了
+var errB error = (*B)(nil)  →  fmt.Println(errB) 打出  <nil>   ← 方法 panic，被 fmt 兜住了
+```
+
+那个 `<nil>` 是 **fmt 内部的兜底**（捕获 panic，发现实参是 nil 指针），**不表示「值是 nil」**。
+所以日志里可能看到 `boom` / `<nil>` / `%!v(PANIC=...)`，**三种都不告诉你这个 error 其实非 nil**。
+**可信的只有 `%T` 和 `== nil`。**
+
+**② `kind(&MyErr{})` ❌ 是 `error`，不是 `*MyErr`。**（`kind(nil)`、`kind(42)` 都对）
+
+```
+kind(&MyErr{}) = error    kind(nil) = other    kind(42) = other
+```
+
+`*MyErr` 实现了 `error`，而 `case error` 排在 `case *MyErr` **前面** ——
+**type switch 从上往下匹配，第一个命中就返回**，后面那个 `case *MyErr` 是永远走不到的死代码。
+
+⭐ 规则：**case 越具体越靠前，接口 case 垫底。**
+
+`kind(nil)` 答对了，理由也对：nil 接口不匹配任何类型 case（连 `case error` 都不匹配），
+只有独立的 `case nil` 能接住它。
+
+**③ ✅ 全对**，`~` 的解释准确。
+
+**④ (1) ✅ = 2。(2) ❌** —— 我空着没填，但解释里写的「长度是 1」是错的。实际是**运行时 panic**：
+
+```
+panic: runtime error: hash of unhashable type []int
+```
+
+它**编译得过**（Go 1.20 起 `any` 满足 `comparable`），但 `[]int` 不可哈希，
+往 map 里塞的瞬间就炸。**`comparable` 挡不住装了 slice 的 `any`：编译期放行，运行时才炸。**
+
+
+**小题 B · 设计题（写在下面，不用写代码）**
+
+1. `store` 包里我把接口切成了 `Getter` / `Putter` 两个单方法接口，而不是直接写一个
+   有 `Get`/`Put`/`Delete`/`List` 的 `Store`。**切小了到底换来了什么具体的好处？**
+   （提示：看 `CopyAll` 的签名，和 `store_test.go` 里那几个测试替身。）
+
+2. 下面四个需求，各自该用泛型还是接口？为什么？
+   - a. 写一个函数，取出任意 map 的所有 key
+   - b. 写一个函数，把「用户」「订单」「商品」都渲染成一行日志
+   - c. 写一个 LRU 缓存，键和值的类型由调用方决定
+   - d. 写一个函数，对「能算出金额的东西」求和（回想 D4 的 `Payer`）
+
+回答：
+1. 接口切小了可以更容易适配到某个结构体上，比如有个**只读**的Store它只能**Get**和**List**，如果是一个定义了`Get`/`Put`/`Delete`/`List`的大接口，那么如果有个方法只需要读Store，就没办法传那个**只读Store**了。
+
+2. 
+a用泛型，因为不需要区分实际是什么类型。
+b用接口，因为需要区分实际是什么类型 - 日志里描述「用户」「订单」「商品」的措辞会有所不同。
+c用泛型，因为不需要区分实际是什么类型。
+d用泛型，因为不需要区分实际是什么类型。
+
+**批改：**
+
+**第 1 问 ✅ 核心答对**（大接口会让只读实现传不进去），但还漏了两笔更具体的收益：
+
+1. **签名即文档，且编译器强制**：`CopyAll(dst Putter, src Getter, ...)` 一眼看出方向 ——
+   dst 只被写、src 只被读。**在实现里手滑写 `src.Put(...)` 是编译错误。**
+   两个参数都是大 `Store` 的话，把 dst/src 传反了照样编译通过、照样跑，然后把数据洗反。
+2. **测试替身的成本**：`getterOnly` 写 1 个方法就能用；大接口要写 4 个，其中 3 个是
+   `panic("not implemented")`。更糟的是**接口以后加方法时，所有假实现全部编译失败**。
+   （Java 里 `implements` 大接口时 IDE 生成一屏 `UnsupportedOperationException`
+   ——那一屏就是接口太大的账单。）
+
+**第 2 问：a ✅ b ✅ c ✅ d ❌ —— d 应该用【接口】。**
+
+「能算出金额」是一种**行为**，每个类型算法不同（Manager 是底薪+提成，Contractor 是工时×时薪）。
+就是 D4 那道 `Payer`。
+
+我的判据「需不需要区分实际类型」在 d 上失灵了，因为从调用方看确实"不需要区分"。换个说法：
+
+> **泛型：同一段代码，作用于不同类型**（代码相同，类型不同）
+> **接口：不同的代码，通过同一个名字被调用**（名字相同，代码不同）
+
+对照我自己写的 `Sum[T Number]`：`total += v` 对每个 T 是**同一个加法**，编译器生成同一段逻辑。
+而 `p.MonthlyPay()` 源码上看着统一，运行时**派发到不同实现** —— 这就是多态，只有接口给得了。
+
+**硬证据**：泛型版本写得出来（`func TotalGeneric[T Payer](ps []T) int` 合法编译），但用不了：
+
+```
+接口版，混合类型:      42500   ✅  []Payer{Manager{...}, Contractor{...}}
+泛型版，只有 Manager:  10500   ✅  []Manager{...}
+泛型版，混合类型:      编译错误 ❌
+    in call to TotalGeneric, T (type any) does not satisfy Payer (missing method MonthlyPay)
+```
+
+`[]T` 是**同质**的（所有元素必须同一个类型），`[]Payer` 是**异质**的。
+⭐ **要「一堆不同类型放在一起」，就只能是接口。**
+泛型给的是「同一份代码套用到不同类型上」，不是「不同类型混在一起」。
+
+补 c 的细节：`Cache[K, V]` 用泛型对（增删查代码对所有 K/V 一样）；但**可插拔的淘汰策略**
+（LRU/LFU/TTL）那部分得是接口。**一个类型里两者常常并存 —— 泛型管数据形状，接口管可变行为。**
+
+
+- 反直觉：
+1. store.go的Put方法里，需要手动拷贝一下Tags，以防在其他地方修改了Tags里的内容导致和已经调用Put那一瞬间的数据不一样。
+- 踩的坑：
+1. 同“反直觉#1”
+- 没搞懂：
