@@ -75,6 +75,7 @@
 - map 的无序遍历、不可寻址、并发写直接 panic
 - string 是不可变 byte 序列；`rune` vs `byte`；中文遍历的正确姿势
 - **练习**：实现一个不共享底层数组的 `Filter[T]`，用测试证明它不污染入参
+- 📖 讲解：[`lessons/D3.md`](lessons/D3.md) · 💻 练习：`internal/slicex/`、`internal/stringx/` · 🔬 `go run ./cmd/slicedemo`
 
 ### D4 · struct、方法、组合
 - struct 定义、字面量、匿名/嵌入字段
@@ -244,7 +245,7 @@
 - [x] D0 环境重建 —— go1.26.6 darwin/arm64 · golangci-lint v2.12.2 · `make check` 全绿
 - [x] D1 工程骨架与类型系统 —— `internal/units` 温度/数据量换算 · 具名类型 + iota + 表驱动测试 · `make check` 全绿
 - [x] D2 函数、指针、错误处理、defer —— `internal/kvconf` 带行号的配置解析器 + `internal/mathx` recover 练习 · `make check` 全绿
-- [ ] D3 slice/map/string
+- [x] D3 slice/map/string —— `internal/slicex` 不共享底层数组的切片工具 + `internal/stringx` 按 rune 的字符串处理 · `make check` 全绿
 - [ ] D4 struct 与组合
 - [ ] D5 interface 与泛型
 - [ ] D6 测试与工程规范
