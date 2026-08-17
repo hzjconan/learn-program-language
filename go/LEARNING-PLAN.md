@@ -83,6 +83,7 @@
 - 嵌入 ≠ 继承：没有多态覆盖，只有方法提升
 - 构造惯例：`NewXxx` 函数，没有构造器
 - **练习**：把一段"Java 味"的继承层次（我提供）重构成 Go 的组合写法
+- 📖 讲解：[`lessons/D4.md`](lessons/D4.md) · 💻 练习：`internal/payroll/` · 🔬 `go run ./cmd/embeddemo`
 
 ### D5 · interface 与泛型
 - **隐式实现**：接口由使用方定义，不是实现方声明（和 Java `implements` 的根本区别）
@@ -246,7 +247,7 @@
 - [x] D1 工程骨架与类型系统 —— `internal/units` 温度/数据量换算 · 具名类型 + iota + 表驱动测试 · `make check` 全绿
 - [x] D2 函数、指针、错误处理、defer —— `internal/kvconf` 带行号的配置解析器 + `internal/mathx` recover 练习 · `make check` 全绿
 - [x] D3 slice/map/string —— `internal/slicex` 不共享底层数组的切片工具 + `internal/stringx` 按 rune 的字符串处理 · `make check` 全绿
-- [ ] D4 struct 与组合
+- [x] D4 struct 与组合 —— `internal/payroll` 用接口+嵌入重构 Java 继承层次 · `cmd/embeddemo` 方法集/嵌入无多态演示 · `make check` 全绿
 - [ ] D5 interface 与泛型
 - [ ] D6 测试与工程规范
 - [ ] D7 周综合项目：日志分析 CLI

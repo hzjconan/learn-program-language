@@ -235,3 +235,173 @@ func modify(v []int) {
 - 踩的坑：
 - 没搞懂：
 1. 关于切片的数据结构实质上是**[ 指向底层数组的指针 | len | cap ]**，问题是，有了指向底层数组的指针，有了len，那它怎么知道起始位是多少呢？
+
+---
+
+## D4 · struct、方法、组合（2026-08-17）
+
+讲解见 `lessons/D4.md`，练习在 `internal/payroll/`。
+先跑 `go run ./cmd/embeddemo`，第 ② 段是今天的题眼。
+
+**小题 A · 接收者与方法集谜题**
+
+三段代码，**先不要跑**，用脑子推。
+
+```go
+// ① 值接收者能不能改到原对象
+type Counter struct{ N int }
+func (c Counter) Inc()  { c.N++ }
+func (c *Counter) Add() { c.N++ }
+
+func a() {
+	c := Counter{}
+	c.Inc()
+	c.Add()
+	p := &Counter{}
+	p.Inc()
+	p.Add()
+	fmt.Println("c.N =", c.N, " p.N =", p.N)
+}
+
+// ② 下面四行，哪些编译不过？
+type Speaker interface{ Speak() string }
+type Cat struct{}
+func (c *Cat) Speak() string { return "喵" }
+
+func b() {
+	var s1 Speaker = &Cat{}     // (1)
+	var s2 Speaker = Cat{}      // (2)
+	c := Cat{}
+	fmt.Println(c.Speak())      // (3)
+	m := map[string]Cat{"a": {}}
+	fmt.Println(m["a"].Speak()) // (4)
+}
+
+// ③ 嵌入的方法里，this 指的是谁
+type Base struct{ Name string }
+func (b Base) Hello() string { return "Hello, " + b.Who() }
+func (b Base) Who() string   { return "Base" }
+
+type Sub struct{ Base }
+func (s Sub) Who() string { return "Sub" }
+
+func c() {
+	s := Sub{Base{Name: "x"}}
+	fmt.Println(s.Who())
+	fmt.Println(s.Hello())
+}
+```
+
+我的答案：
+
+```
+① c.N = 1       p.N = 2
+
+② 编译不过的是：( (3)和(4)  )
+
+③ s.Who()   = Sub
+   s.Hello() = Hello, Base
+```
+
+为什么（③ 请说清楚「为什么 Hello 里调不到 Sub.Who」）：
+① 
+**c**是一个结构体，**Inc**方法的接受者是**Counter**，所以在调用**c.Inc()**的时候，相当于
+把**c**复制了一份丢给了**Inc**，在它内部对那个拷贝后的结构体做修改不影响**c**。
+**Add**方法的接受者是**Counter**类型的指针，所以在调用**c.Add()**的时候，相当于把**c**的地址丢给了**Add**，在它内部对那个指针指向的结构体做修改，所以**c.N**会增加1，所以最后是1
+
+**p**本身是**Counter**结构体实例的指针，所以在调**p.Inc()**和**p.Add()**都会改到这个实例本身，所以最后是2
+
+②
+第(3)编译不过，是因为**Speak**这个方法是绑定在指向**Cat**结构体实例的指针上的，而**c**是这个结构体的一个实例本身。
+第(4)编译不过，是因为从map通过**key**拿出来的东西是不可寻址的，因为在map扩容时，内部的数据会被重新分配内存地址。
+
+③
+打印**s.Who()**的时候，因为286行那里给Sub绑定了一个**Who**函数，相当于覆盖了**Base**里的**Who**，所以其实调用的是这个**新的Who**。
+打印**s.Hello()**的时候，因为**Hello**方法没有被覆盖，go一路找上去，在嵌入的**Base**里找到了**Hello**方法，调用它，它内部调的**Who**函数只能是**Base**自己定义的，因为它不可能知道自己被嵌入到什么里面去了，所以最终输出**Hello, Base**
+
+
+实际跑完的验证结果（对了/错在哪）：
+
+**① ❌ 错了：`p.N` 是 1，不是 2。**（实测输出 `c.N = 1  p.N = 1`）
+
+`c` 那半边的推理是对的。错在 `p`：我以为「手里是指针 → 调什么方法都能改到原对象」。
+不成立。**「有没有拷贝」只由接收者类型决定，和调用者手里拿的是值还是指针无关。**
+
+`p.Inc()` 会被编译器展开成 `(*p).Inc()`，运行时两步：
+1. 解引用 `*p`，顺着地址找到那个真正的 `Counter` 实例；
+2. 把它整个拷贝一份传给 `Inc`。方法里的 `c` 是全新变量，`c.N++` 改的是副本。
+
+打地址验证过，两次 `p.Inc()` 里的 `&c` 是两个不同地址（每次都新拷一份），
+而 `p.Add()` 里的 `c` 就是 `main` 里的 `p` 本身：
+
+```
+main 里     p = 0x...4020
+  Inc  里 &c = 0x...4028     ← 拷贝
+  Inc  里 &c = 0x...4030     ← 又一份新拷贝
+  Add  里  c = 0x...4020     ← 就是原件
+```
+
+四种组合，唯一决定拷贝的是**列**，不是行：
+
+| 手里是 | 调值接收者方法 | 调指针接收者方法 |
+|---|---|---|
+| 值 `c` | 直接传 → **拷贝** | `(&c)` → **取地址，无拷贝**（要求可寻址） |
+| 指针 `p` | `(*p)` → **解引用 + 拷贝** | 直接传 → **无拷贝** |
+
+自动取地址 / 自动解引用只是帮我把类型对上，从不改变这件事。
+
+推论 1（nil 接收者）：
+```go
+var p *Counter   // nil
+p.Add()   // ✅ 不 panic —— 只是把 nil 传进去，没碰字段就没事
+p.Inc()   // ❌ panic —— 必须先解引用才能拷贝，nil 解不出东西
+```
+推论 2（性能）：这个拷贝的成本是**整个 struct 的大小**。大 struct 在热路径上用值接收者
+就是白白的内存拷贝——这才是「struct 大就用指针接收者」的真正理由。
+
+**② ❌ 答反了：编译不过的是 (2) 和 (4)，不是 (3) 和 (4)。**
+
+- **(3) 能编译。** `c` 是可寻址的局部变量，编译器改写成 `(&c).Speak()`。
+  我的理由「方法绑在指针上，c 是实例本身」正是要被拆掉的直觉。
+- **(2) 编译不过**，这才是指针接收者真正会咬人的地方：
+  ```
+  cannot use Cat{} as Speaker value: Cat does not implement Speaker
+      (method Speak has pointer receiver)
+  ```
+- **(4) 我答对了，理由也对**：map 元素不可寻址。
+
+自查：如果我的模型（「值上不能调指针方法」）成立，(2) 也该被我标出来，但我漏了。
+说明我当时把 (3)(4) 当成同一类问题，没看出 (3) 不挂和 (4) 挂其实是**同一条规则的两面**
+——能不能取到地址。三行并排：
+
+| 写法 | 结果 | 原因 |
+|---|---|---|
+| `c.Speak()`，`c` 是变量 | ✅ | 可寻址 → `(&c).Speak()` |
+| `m["a"].Speak()` | ❌ | map 元素不可寻址 |
+| `var s Speaker = Cat{}` | ❌ | **接口赋值不走这条路**：方法集是硬规则，`Cat` 的方法集里没有 `Speak` |
+
+第三行是独立的规则（方法集，D4.md §3 那张表），别和前两行混着记：
+**可寻址 → 编译器帮忙；接口赋值 → 只认方法集，不帮忙。**
+
+**③ ✅ 全对**，理由也精准（「它不可能知道自己被嵌入到什么里面去了」）。
+
+**小题 B · 设计题（写在下面，不用写代码）**
+
+`Contractor` 没有嵌入 `Employee`，它凭什么能进 `[]Payer`？
+如果这套东西用 Java 继承来做，你会怎么安排类层次？会遇到什么别扭的地方？
+回答：因为`Contractor`也有**MonthlyPay**和**Label**这2个方法，符合**Payer**这个接口的定义。如果用java来做，我也可以让`Contractor`继承`Employee`，然后构造函数里面需要输入**Hours**和**HourlyRate**，在**MonthlyPay**方法里面，我需要根据**Hours**和**HourlyRate**来计算薪酬总额。
+
+补：前半对，后半只说了「怎么绕」，没答出问的「别扭在哪」。
+`Contractor extends Employee` 之后的四处别扭：
+1. 背上一个用不上的 `baseSalary`（是 0，但每个读代码的人都要停下来想为什么）；
+2. 抽象方法 `bonus()` 对它毫无意义，只能 `return 0` 或抛 `UnsupportedOperationException`（LSP 违反的经典味道）；
+3. 模板方法 `calculatePay() = baseSalary + bonus()` 对它是错的，子类第一件事就是掀翻基类骨架——这时候继承已经零收益，只剩耦合；
+4. 真要做干净，得在 `Employee` 之上再抽一个 `Payable` 接口——**Java 最后也会走到接口，只是要先动整个类层次。**
+
+所以 Go 的省事不在于「不用写接口」，而在于**接口能后加**：`Payer` 是后定义的，
+`Contractor` 一行没改就满足了。Java 里做不到，除非能改 `Contractor` 的源码去 `implements`。
+
+
+- 反直觉：
+- 踩的坑：
+- 没搞懂：
