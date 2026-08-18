@@ -100,7 +100,8 @@
 - 项目布局：`cmd/` `internal/` `pkg/` 的真实含义（`internal` 是编译器强制的）
 - `go.mod` / `go.sum` / 版本选择 MVS / `go mod tidy` / vendor
 - `gofmt` 不可协商、`go vet`、`golangci-lint` 配置
-- **练习**：给前 5 天的代码补齐测试，覆盖率打到 80%+，并配好 lint
+- **练习**：~~给前 5 天的代码补齐测试~~ → 改为**用测试抓 bug**（前 5 天的 internal/ 覆盖率已 100%，但测试都是 Claude 写的；D6 换成「我给一份 100% 覆盖却抓不到 bug 的测试，你来写能抓到的」）
+- 📖 讲解：[`lessons/D6.md`](lessons/D6.md) · 💻 练习：`internal/cache/`（3 个 bug）+ `store`/`genx` 补基准与 Example
 
 ### D7 · 周综合项目 + 复盘
 - **项目**：命令行日志分析工具（读取大文件 → 解析 → 聚合统计 → 多种格式输出）
@@ -250,7 +251,7 @@
 - [x] D3 slice/map/string —— `internal/slicex` 不共享底层数组的切片工具 + `internal/stringx` 按 rune 的字符串处理 · `make check` 全绿
 - [x] D4 struct 与组合 —— `internal/payroll` 用接口+嵌入重构 Java 继承层次 · `cmd/embeddemo` 方法集/嵌入无多态演示 · `make check` 全绿
 - [x] D5 interface 与泛型 —— `internal/store` 可插拔数据源（小接口 + 依赖倒置 + nil 接口坑）+ `internal/genx` 泛型工具 · `cmd/ifacedemo` 接口二元组演示 · `make check` 全绿
-- [ ] D6 测试与工程规范
+- [x] D6 测试与工程规范 —— `internal/cache` 用测试抓出 3 个植入 bug（覆盖率 100% 却全漏网）· `store.CopyAll` 补测到变异 4/4 · `genx.Filter` 预分配基准对比 + `Example` 函数 · `make check` 全绿
 - [ ] D7 周综合项目：日志分析 CLI
 - [ ] D8 goroutine 与 channel
 - [ ] D9 sync 与竞态

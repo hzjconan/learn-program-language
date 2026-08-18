@@ -22,6 +22,7 @@
 | [11](#11-go-怎么表示集合set为什么是-mapkstruct) | Go 怎么表示集合（set）？为什么是 `map[K]struct{}` | 类型 |
 | [12](#12-预分配的-cap-会不会白占内存slicesclip) | 预分配的 cap 会不会白占内存？`slices.Clip` | 切片 |
 | [13](#13-一个-nil-指针装进-error-接口后为什么就不是-nil-了) | 一个 nil 指针，装进 `error` 接口后为什么就不是 nil 了 | 接口 |
+| [14](#14-跑-benchmark-时为什么要加--run-参数) | 跑 benchmark 时为什么要加 `-run` 参数 | 测试 |
 
 ---
 
@@ -761,3 +762,65 @@ target.Field               // → panic: nil pointer dereference
 ```
 
 `errors.As` 只按**类型**匹配，类型是对得上的。所以「`errors.As` 返回 true」不等于「拿到了可用的对象」。这进一步说明：**typed nil 必须在源头掐掉**，别指望下游的错误处理帮你兜。
+
+---
+
+## 14. 跑 benchmark 时为什么要加 -run 参数
+
+**一句话**：`-bench` 只筛选**基准测试**，`-run` 筛选**普通测试**。不写 `-run` 时它默认是 `-run=.`（匹配全部），于是包里所有 `TestXxx` 都会跟着跑一遍。`-run='^$'` 是个匹配不到任何测试名的正则，效果就是「一个测试都不跑，只跑 benchmark」。
+
+```bash
+go test -bench=. -benchmem -run='^$' ./internal/genx/
+```
+
+### 三个理由
+
+**① 最要紧：只要有一个测试失败，基准测试压根不会跑。**
+
+`go test` 的顺序是**先跑测试，全过了才跑 benchmark**。实测对比（包里放了一个失败的测试和一个 sleep 800ms 的慢测试）：
+
+```
+######## 不加 -run
+--- FAIL: TestFailing
+FAIL                              ← ⚠️ BenchmarkSum 一行都没有
+用时 2.78s
+
+######## 加 -run='^$'
+BenchmarkSum-10   3006553   397.9 ns/op   0 B/op   0 allocs/op
+ok
+用时 1.64s
+```
+
+**而且报错里完全看不出「你的 benchmark 被跳过了」。** 调优时这个尤其烦：你正在改实现、测试暂时是红的，然后怎么都看不到性能数据。
+
+**② 慢测试白白拖时间。** 这里差 1.1 秒；真实项目里起容器、连数据库的集成测试能让你每次调优都等半分钟。
+
+**③ 输出混杂。** benchmark 结果本来就要人眼比对，中间夹一堆 `=== RUN` 很难读。
+
+### 为什么写 `^$`
+
+`^$` = 锚定的空字符串，没有任何测试名能匹配。也见过有人写 `-run=XXX` / `-run=NONE`——效果一样，但靠的是「赌没有测试叫这个名字」。**`^$` 表达的是「我就是要一个都不跑」**，意图明确。
+
+### 反过来：不加 `-bench` 时 benchmark 不会跑
+
+这是默认行为，所以日常 `go test ./...` 不会被 benchmark 拖慢。四个前缀的执行时机见 `lessons/D6.md` §2：
+
+| 前缀 | 什么时候跑 |
+|---|---|
+| `TestXxx` | 默认跑 |
+| `BenchmarkXxx` | **只有加 `-bench` 才跑** |
+| `ExampleXxx` | 默认跑（前提是有 `// Output:`） |
+| `FuzzXxx` | 默认只跑种子；加 `-fuzz` 才真正模糊 |
+
+### 常用组合速查
+
+```bash
+go test -bench=. -benchmem -run='^$' ./pkg/          # 标准姿势
+go test -bench=BenchmarkFilter -benchmem -run='^$' ./pkg/   # 只跑某一个
+go test -bench=. -benchtime=10s -run='^$' ./pkg/     # 每个跑够 10 秒（默认 1 秒）
+go test -bench=. -benchtime=100x -run='^$' ./pkg/    # 固定跑 100 次
+go test -bench=. -count=10 -run='^$' ./pkg/ > new.txt
+benchstat old.txt new.txt                            # 统计显著性对比
+```
+
+**`-benchmem` 一定要加**——`allocs/op` 往往比 `ns/op` 更能说明问题，而且跨机器可比。三个指标的含义见 `lessons/D6.md` §6。

@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -243,6 +244,42 @@ func TestCopyAll(t *testing.T) {
 	}
 	if got := dst.Len(); got != 3 {
 		t.Errorf("dst.Len() = %d, want 3", got)
+	}
+}
+
+// errorGetter 是一个总是返回错误的 Getter 实现，用于测试 CopyAll 的错误传播。
+type errorGetter struct {
+	callCount int
+}
+
+var errUnknown = errors.New("未知错误")
+
+func (eg *errorGetter) Get(_ string) (Record, error) {
+	eg.callCount++
+	if eg.callCount >= 3 {
+		return Record{}, errUnknown
+	}
+	return Record{
+		ID:   fmt.Sprintf("u%d", eg.callCount),
+		Name: fmt.Sprintf("我是第%d条记录", eg.callCount),
+	}, nil
+}
+
+func TestCopyAllWithError(t *testing.T) {
+	src := &errorGetter{}
+	var dst MemStore
+	copied, err := CopyAll(&dst, src, []string{"u1", "u2", "u3"})
+	if err == nil {
+		t.Fatal("CopyAll 返回 nil，want 错误")
+	}
+	if !errors.Is(err, errUnknown) {
+		t.Errorf("errors.Is(err, errUnknown) = false，err = %v\n（包装要用 %%w）", err)
+	}
+	if copied != 2 {
+		t.Errorf("copied = %d, want 2（只算真的拷过去的）", copied)
+	}
+	if !strings.Contains(err.Error(), "u3") {
+		t.Errorf("错误消息里没说是哪个 id 出的问题：%q", err)
 	}
 }
 
