@@ -107,6 +107,7 @@
 - **项目**：命令行日志分析工具（读取大文件 → 解析 → 聚合统计 → 多种格式输出）
 - 覆盖本周全部知识点，我做一次完整的 code review
 - 复盘：把你 `NOTES.md` 里的疑问集中解决
+- 📖 讲解：[`lessons/D7.md`](lessons/D7.md) · 💻 项目：`internal/logx/` + `cmd/loganalyze/`
 
 ---
 
@@ -252,7 +253,7 @@
 - [x] D4 struct 与组合 —— `internal/payroll` 用接口+嵌入重构 Java 继承层次 · `cmd/embeddemo` 方法集/嵌入无多态演示 · `make check` 全绿
 - [x] D5 interface 与泛型 —— `internal/store` 可插拔数据源（小接口 + 依赖倒置 + nil 接口坑）+ `internal/genx` 泛型工具 · `cmd/ifacedemo` 接口二元组演示 · `make check` 全绿
 - [x] D6 测试与工程规范 —— `internal/cache` 用测试抓出 3 个植入 bug（覆盖率 100% 却全漏网）· `store.CopyAll` 补测到变异 4/4 · `genx.Filter` 预分配基准对比 + `Example` 函数 · `make check` 全绿
-- [ ] D7 周综合项目：日志分析 CLI
+- [x] D7 周综合项目：日志分析 CLI —— `internal/logx` 解析/聚合/可插拔输出 + `cmd/loganalyze` CLI · 覆盖率 98.7% · 变异测试 14/14 · `make check` 全绿 · **第 1 周完成**
 - [ ] D8 goroutine 与 channel
 - [ ] D9 sync 与竞态
 - [ ] D10 context 与并发模式

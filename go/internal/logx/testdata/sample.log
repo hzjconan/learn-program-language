@@ -1,0 +1,11 @@
+2026-08-18T10:00:00Z INFO api-gateway 15 GET /users/42 -> 200
+2026-08-18T10:00:01Z INFO api-gateway 23 GET /orders -> 200
+2026-08-18T10:00:02Z WARN api-gateway 150 slow query on /reports
+2026-08-18T10:00:03Z ERROR db 200 connection refused
+2026-08-18T10:00:04Z INFO db 5 reconnected
+
+2026-08-18T10:00:05Z DEBUG cache 1 hit ratio 0.93
+这行整个是坏的
+2026-08-18T10:00:06Z NOPE api-gateway 10 unknown level
+2026-08-18T10:00:07Z ERROR db abc bad latency
+2026-08-18T10:00:08Z INFO cache 2
