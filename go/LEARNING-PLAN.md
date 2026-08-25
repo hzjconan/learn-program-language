@@ -121,6 +121,7 @@
 - `select`、`default`、超时模式
 - 死锁、goroutine 泄漏的成因
 - **练习**：用 channel 实现一个有界并发的爬取器
+- 📖 讲解：[`lessons/D8.md`](lessons/D8.md) · 💻 练习：`internal/crawl/` · 🔬 `go run ./cmd/chandemo`
 
 ### D9 · sync、内存模型、竞态
 - `sync.Mutex` / `RWMutex` / `WaitGroup` / `Once` / `sync.Map` 各自的适用场景
@@ -254,7 +255,7 @@
 - [x] D5 interface 与泛型 —— `internal/store` 可插拔数据源（小接口 + 依赖倒置 + nil 接口坑）+ `internal/genx` 泛型工具 · `cmd/ifacedemo` 接口二元组演示 · `make check` 全绿
 - [x] D6 测试与工程规范 —— `internal/cache` 用测试抓出 3 个植入 bug（覆盖率 100% 却全漏网）· `store.CopyAll` 补测到变异 4/4 · `genx.Filter` 预分配基准对比 + `Example` 函数 · `make check` 全绿
 - [x] D7 周综合项目：日志分析 CLI —— `internal/logx` 解析/聚合/可插拔输出 + `cmd/loganalyze` CLI · 覆盖率 98.7% · 变异测试 14/14 · `make check` 全绿 · **第 1 周完成**
-- [ ] D8 goroutine 与 channel
+- [x] D8 goroutine 与 channel —— `internal/crawl` 有界并发爬取器（超时不泄漏 / worker pool / 逐层去重）· 覆盖率 96.7% · 变异测试 8/8 · `cmd/chandemo` 八段演示 · `make check` 全绿
 - [ ] D9 sync 与竞态
 - [ ] D10 context 与并发模式
 - [ ] D11 net/http 服务端

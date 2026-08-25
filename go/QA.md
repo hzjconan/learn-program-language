@@ -23,6 +23,7 @@
 | [12](#12-预分配的-cap-会不会白占内存slicesclip) | 预分配的 cap 会不会白占内存？`slices.Clip` | 切片 |
 | [13](#13-一个-nil-指针装进-error-接口后为什么就不是-nil-了) | 一个 nil 指针，装进 `error` 接口后为什么就不是 nil 了 | 接口 |
 | [14](#14-跑-benchmark-时为什么要加--run-参数) | 跑 benchmark 时为什么要加 `-run` 参数 | 测试 |
+| [15](#15-无缓冲-channel-什么时候会死锁) | 无缓冲 channel 什么时候会死锁 | 并发 |
 
 ---
 
@@ -824,3 +825,105 @@ benchstat old.txt new.txt                            # 统计显著性对比
 ```
 
 **`-benchmem` 一定要加**——`allocs/op` 往往比 `ns/op` 更能说明问题，而且跨机器可比。三个指标的含义见 `lessons/D6.md` §6。
+
+---
+
+## 15. 无缓冲 channel 什么时候会死锁
+
+**一句话**：给每个阻塞的 goroutine 画一条箭头指向「谁能解救我」，**箭头成环就是死锁**。和「发送还是接收」无关。
+
+### 先破除一个错误的记法
+
+「所有参与者都在发送这一侧就会死锁」——**这是特例，不是规律**。两个都在接收照样死锁：
+
+```go
+// A：互相【发送】→ 死锁
+x, y := make(chan int), make(chan int)
+go func() { x <- 1; <-y }()
+y <- 2
+<-x
+// fatal error: all goroutines are asleep - deadlock!
+// goroutine 1 [chan send] / goroutine 34 [chan send]
+
+// B：互相【接收】→ 也死锁
+go func() { <-y; x <- 1 }()
+<-x
+y <- 2
+// goroutine 1 [chan receive] / goroutine 6 [chan receive]
+
+// C：一发一收，顺序对上了 → 正常
+go func() { <-x; y <- 2 }()
+x <- 1
+fmt.Println(<-y)     // OK 2
+```
+
+### 正确的模型：等待图
+
+无缓冲 channel 的本质是**交接**——收发必须同时到场。所以每个阻塞的 goroutine 都在等一个具体的对象：
+
+| 阻塞在 | 它在等 |
+|---|---|
+| `ch <- v` | **有人来 `<-ch`** |
+| `<-ch` | **有人来 `ch <- v`** |
+
+顺着「谁能解救我」走一圈，**回到起点就是死锁**。C 能跑是因为箭头是一条链而不是环。
+
+### 实战：worker pool 的经典死锁
+
+```go
+jobs := make(chan Job)
+results := make(chan Result)      // 都无缓冲
+
+// N 个 worker：for j := range jobs { results <- process(j) }
+
+for _, j := range allJobs { jobs <- j }   // ⚠️ 主流程同步投递
+close(jobs)
+for r := range results { ... }            // 投递完才开始收
+```
+
+```
+主流程 卡在 jobs <- j     ──等待─→ 有 worker 来取 jobs
+                                      ↓ 但 worker 全卡在发结果
+worker 卡在 results <- x  ──等待─→ 有人来取 results
+                                      ↓ 只有主流程会取
+                                   主流程 ← 环闭合
+```
+
+**主流程既是 `jobs` 的唯一发送者，又是 `results` 的唯一接收者**——它把自己卡在第一个角色上，第二个角色就没人干了。
+
+⭐ **由此得到一条实用判据：一个 goroutine 不能既是某条 channel 的唯一接收者，又在别处阻塞着。**
+
+### 两种破环方式
+
+| 方式 | 原理 | 代价 |
+|---|---|---|
+| 给 `results` 加缓冲 `len(jobs)` | 缓冲位是「不需要对方到场就能放下的槽」，前 N 次发送**不产生等待边** | 内存 O(N) |
+| **把投递挪进 goroutine** ⭐ | 主流程**卸掉一个角色**，只负责收集，永远随时可收 | 内存 O(1) |
+
+```go
+go func() {
+    for _, j := range allJobs { jobs <- j }
+    close(jobs)
+}()
+for r := range results { ... }    // 边投边收
+```
+
+**关键不是「多起了一条 goroutine」，是「主流程卸掉了一个角色」。**
+
+### code review 时怎么查
+
+1. 列出所有**无缓冲**的 channel 操作（`make(chan T)` 不带第二个参数）
+2. 对每条 goroutine，写下它的阻塞点顺序
+3. 顺着「谁能解救我」走一圈，看会不会回到起点
+
+最容易漏的是第 3 步里**「唯一接收者」这个隐含前提**——你以为有人会来收，其实那个人正卡在别处。
+
+### ⚠️ 死锁检测只在「全部睡着」时触发
+
+```
+fatal error: all goroutines are asleep - deadlock!
+```
+
+只要还有**一条** goroutine 在跑（HTTP server 的 accept 循环、后台定时器、一个空转的循环），**这个环就静默地卡在那儿**，运行时不会报任何东西。
+
+真实服务里的表现是：**某个请求永远不返回** + **goroutine 数只增不减**。那时候要靠 `/debug/pprof/goroutine` 看栈（D16）——栈上的 `[chan send]` / `[chan receive]` 标记会直接告诉你这条 goroutine 卡在等什么、卡在哪一行。
