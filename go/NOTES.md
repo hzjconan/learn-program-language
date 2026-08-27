@@ -1046,3 +1046,279 @@ worker 直接往 results 发）。而且对某些调用方无序更好：想显�
 - 反直觉：
 - 踩的坑：
 - 没搞懂：
+
+---
+
+## D9 · sync、内存模型、竞态（2026-08-25）
+
+讲解见 `lessons/D9.md`，练习在 `internal/racefix/`（埋了 6 个并发问题）。
+先跑 `go run ./cmd/syncdemo`，第 ⑦ 段是题眼（happens-before）。
+
+**小题 A · 并发语义谜题**
+
+五段，**先不要跑**，用脑子推。
+
+```go
+// ① 这段会不会一直跑下去？为什么？
+var done bool
+func a() {
+	go func() { time.Sleep(time.Millisecond); done = true }()
+	for !done {
+	}
+	fmt.Println("退出了")
+}
+
+// ② 下面哪几行有问题？
+type S struct {
+	mu sync.Mutex
+	n  int
+}
+func (s S) Inc()      { s.mu.Lock(); s.n++; s.mu.Unlock() }   // (1)
+func (s *S) Get() int { s.mu.Lock(); defer s.mu.Unlock(); return s.n }  // (2)
+func (s *S) Both()    { s.mu.Lock(); defer s.mu.Unlock(); s.Get() }     // (3)
+
+// ③ 这两段等价吗？
+//   A: var n atomic.Int64;  n.Add(1); n.Add(1)
+//   B: var mu sync.Mutex; var n int64
+//      mu.Lock(); n++; mu.Unlock(); mu.Lock(); n++; mu.Unlock()
+// 再问：如果要保证「total 和 sum 始终匹配」，能用两个 atomic 吗？
+
+// ④ 这个双检锁错在哪？（Java 里同样的写法也是错的）
+var loaded bool
+var cfg *Config
+var mu sync.Mutex
+func Load() *Config {
+	if !loaded {
+		mu.Lock()
+		if !loaded {
+			cfg = &Config{Name: "x"}
+			loaded = true
+		}
+		mu.Unlock()
+	}
+	return cfg
+}
+
+// ⑤ -race 报不报？测试过不过？
+func e() {
+	m := map[string]int{}
+	var wg sync.WaitGroup
+	for i := range 10 {
+		wg.Go(func() { m[fmt.Sprint(i)] = i })
+	}
+	wg.Wait()
+	fmt.Println(len(m))
+}
+```
+
+我的答案：
+
+```
+① 会 一直跑，因为这里没有任何同步和锁的机制，主流程里的for循环看不见go routine里的值改动，go需要锁来保证"happens-before"
+
+② 有问题的是：(   1     )，因为函数接收者是***S***，意味着调用这个函数的时候S的实例会被拷贝一份，而Mutex不能被拷贝
+
+③ A 和 B 不等价，因为B调了两次mu.Lock()，mutex在一个go routine里不能被重入
+   两个 atomic 不能 保证 total 和 sum 匹配，因为一个atomic实例只能保证对自己的操作是原子的，两个实例之间的操作没有保证
+
+④ 1092行`if !loaded`的读取是没有锁保证的，可能导致某2个go routine看到它是nil，都去建connection了
+
+⑤ -race 报： 对map并发写          ；不带 -race 时会：panic因为对map并发写  
+```
+
+为什么（①④⑤ 请说清楚）：
+①已经在上面回答了
+
+②已经在上面回答了
+
+③已经在上面回答了
+
+④已经在上面回答了
+
+⑤已经在上面回答了
+
+
+实际跑完的验证结果（对了/错在哪）：
+
+**① ⚠️ 结论错了（实测【退出了】，1ms），但理由是对的。**
+
+我答「会一直跑」。实测这个 Go 版本没有把 `done` 提到循环外，循环 1ms 就退出了。
+
+但「没有同步就没有 happens-before」这个理由**完全正确**。所以真正的答案是：
+
+> **这段代码是未定义行为。它今天退出了，不保证明天还退出。**
+
+换个 Go 版本、优化级别、CPU 架构，行为都可能变。`-race` 会照样报警 ——
+**它判的是「有没有 happens-before」，不是「这次跑对没跑对」**。
+
+⭐ **「跑对了」不等于「是对的」。** 这是并发代码和普通代码最大的区别：
+普通代码测试通过基本就没问题，并发代码测试通过什么也证明不了。
+
+**② ⚠️ 漏了 (3)。**
+
+(1) 对 —— 值接收者拷贝了 `sync.Mutex`，`go vet` 的 `copylocks` 会抓。
+
+**(3) 也有问题 —— 自锁死**（实测卡住了）：
+
+```go
+func (s *S) Both() {
+	s.mu.Lock()          // ← 第一次
+	defer s.mu.Unlock()  // ← 要到函数结束才解
+	s.Get()              // ← Get 内部又 s.mu.Lock() → 死
+}
+```
+
+修法就是那条惯例：**导出方法加锁，内部方法不加锁**（命名带 `Locked` 后缀）。
+
+**③ ❌ 前半答错了，理由也错了；后半 ✅ 对。**
+
+我说「B 调了两次 Lock，mutex 不能重入」—— **那不是重入**。
+
+```go
+// B：先解锁再加锁，锁在两次之间是【空闲】的 → 完全合法
+mu.Lock(); n++; mu.Unlock();   mu.Lock(); n++; mu.Unlock()
+
+// 真正的重入：还没解锁就再次加锁（嵌套）
+mu.Lock()
+mu.Lock()      // ← 死
+```
+
+**所以 A 和 B 是等价的**：都是两次各自原子的自增，都不保证「两次合起来原子」。
+区别只有性能（atomic 更快）。
+
+> 判断方法：**画一条时间线，看 `Unlock` 有没有在第二次 `Lock` 之前**。
+> ②(3) 的 `Both` 是真重入（`defer Unlock` 要到函数结束才执行），B 不是。
+
+后半「两个 atomic 之间没有原子性」✅ 完全正确。
+
+**④ ⚠️ 描述的是错误的失败模式。**
+
+我答「可能导致 2 个 goroutine 都去建 connection」—— **不会**。
+里面还有一层 `if !loaded` 且在锁保护下，**双重检查的「第二重」正是防这个的，它有效**。
+
+真正的问题是**可见性**：goroutine B 在锁外读到 `loaded == true`，然后读 `cfg`，
+这两次读都没有 happens-before 保护，所以可能看到：
+
+- `loaded` 已是 true 但 `cfg` 还是 nil
+- 或 `cfg` 非 nil 但它指向的对象**字段还没写完**（`Name` 是空串）
+
+**「初始化执行了两次」不是这个 bug 的症状，「拿到半成品」才是。**
+Java 里同样的代码要给 `loaded` 加 `volatile`，`volatile` 建立的正是 happens-before。
+
+**⑤ ⚠️ 两处要精确。**
+
+「`-race` 报对 map 并发写」✅ 对。「不带 -race 会 panic」有两个偏差：
+
+| 我说的 | 实际 |
+|---|---|
+| **panic** | **`fatal error`** —— `recover()` 拦不住，整个进程死 |
+| 会（必然） | **概率性**：实测 20 次里崩了 7 次，13 次静默通过 |
+
+只有 10 条 goroutine、每条写一次，窗口很窄。**「没崩」不代表没问题** —— 呼应 ① 那条。
+
+
+**小题 B · 设计题（写在下面，不用写代码）**
+
+1. D8 说「数据有明确的主人就用 channel」，D9 说「共享状态用 mutex」。
+   `racefix` 里的 6 个问题，你分别选了什么？**有没有哪个你觉得两种都行？**
+   如果有，说说取舍。
+   回答：已经在代码里写注释了
+
+2. `Registry.Snapshot` 返回内部 map 是个 bug。但「每次都深拷贝」在 map 很大时很贵。
+   除了深拷贝，还有什么办法让调用方拿到一致的视图？（提示：想想 D5 的接口和 D8 的 channel）
+   回答：可以另外定义一个interface，里面只包含一些必要的，对map的只读方法，比如Len，Get之类，
+   Snapshot方法的返回类型改成这个接口。这个接口的实现可以定义一个非导出的struct，struct内部有个map（就是Snapshot现在要返回的那个），然后把map本身的方法包装一下。
+
+3. `go vet` 抓到了 `WaitGroup.Add called from inside new goroutine`，
+   但没抓到另外 5 个。**为什么这个能静态分析出来，别的不行？**
+   这对「该依赖工具到什么程度」有什么启示？
+   回答：因为go vet是静态分析工具，只能分析静态代码，不能分析动态代码。而-race是动态分析工具。没有一个工具能完美得发现所有代码问题，开发时应该多借鉴一些最佳实践，尽量提早发现问题 - 能在编译阶段发现的，就不要等到运行时，能在test/CICD时候发现的，就不要留到生产环境。
+
+**小题 B 批改**
+
+**1 · ⚠️ 没答到点上。** 注释确实写了，但题目问的是「**有没有哪个你觉得两种都行**」。
+
+我的看法：**问题 6（Aggregate 的 total 累加）两种都行。**
+- `atomic.Int64`：简单、快（我选的）
+- 也可以让每条 goroutine 把结果发到 channel，由一条协调 goroutine 累加
+
+取舍：atomic 更简单；channel 版本在「累加逻辑变复杂」（同时更新 total、count、max）时
+更清楚，因为所有更新都在一处、天然一致。**只累加一个数时 atomic 是对的选择。**
+
+**2 · ⚠️ 方向对了一半 —— 而另一半正好是 Claude 那半。**
+
+我提的「只读接口 + 非导出 struct 包装 map」解决了「调用方改不了」，
+**但没解决「一致性」**：那个 struct 里的 map 如果是内部那张，写者还在改它 → 照样竞态；
+如果是拷贝，就还是付了拷贝代价。
+
+真正零拷贝又一致的办法是 **copy-on-write**：
+
+```go
+type Registry struct {
+	mu sync.Mutex                       // 只保护写
+	m  atomic.Pointer[map[string]int]
+}
+
+func (r *Registry) Add(name string) {
+	r.mu.Lock(); defer r.mu.Unlock()
+	next := maps.Clone(*r.m.Load())     // 写的时候拷贝
+	next[name]++
+	r.m.Store(&next)                    // 原子换指针
+}
+```
+
+**写者永远不改已发布的 map，而是造新的换指针** → 老快照从发布起就没人写过，天然安全。
+
+⭐ **但裸 COW 有个洞**（我追问出来的）：`*r.m.Load()` 就是个普通 map，调用方照样能写。
+实测：改完之后内部数据被污染成了 `map[svc:9999 注入的键:1]`。
+
+**Go 没有 const / immutable / readonly —— 「不可变」永远靠封装，不靠类型系统。**
+
+所以完整方案是 **COW + 只读视图**（我的那半 + Claude 的那半）：
+
+```go
+type View struct{ m map[string]int }   // ← 小写字段，包外碰不到
+func (v View) Get(k string) int  { return v.m[k] }
+func (v View) Len() int          { return len(v.m) }
+func (v View) Range(f func(string, int)) { for k, n := range v.m { f(k, n) } }
+
+func (r *Registry) Snapshot() View { return View{m: *r.m.Load()} }  // 零拷贝
+```
+
+三个方案的取舍：
+
+| 方案 | 读成本 | 写成本 | 适合 |
+|---|---|---|---|
+| `maps.Clone` 每次读都拷（我现在的实现） | **O(n)** | O(1) | 读写都不频繁、map 小 —— **先用这个** |
+| COW + 只读视图 | **O(1)** | O(n) | 读远多于写、map 大 |
+| 每个方法加锁的活视图 | O(1) | O(1) | 不要「一致快照」，只要「当下的值」 |
+
+补两条：**封装边界是「包」不是「类型」**（同包代码照样能碰 `v.m`）；
+**零拷贝共享的前提是数据不可变**，只要还有人可能改就必须拷贝或加锁。
+
+**3 · ✅ 对，但可以更锋利。**
+
+「静态 vs 动态」「没有工具能发现所有问题」「能早发现就别晚」都对。更锋利的说法是：
+
+> **`WaitGroup.Add` 那个是【语法模式】，另外 5 个是【语义问题】。**
+
+`go func(){ wg.Add(1) ... }()` —— 不需要任何运行时信息，**看代码形状就能判定**。
+
+而「这两条 goroutine 会不会同时碰同一块内存」需要知道哪些 goroutine 并发运行、
+指针指向哪、map 是不是同一个 —— **这在一般情况下不可判定**（别名分析、可达性分析）。
+
+⭐ **判据：这个错误能不能只看「代码长什么样」就认出来？**
+能 → 静态工具可以抓（`copylocks`、`printf`、`SA4005`、`SA4023`）；
+不能 → 只能运行时抓（`-race`）或靠人 review。
+
+这和 D6 那句「覆盖率证明不了测试有用」是同一个道理。
+
+
+- 反直觉：
+小题A④，即使“cfg=xxx”比“loaded=true”先赋值，另一个go routine在读到**loaded=true**之后再去读**cfg**也有可能是nil。编译器或 CPU 为了优化性能，可能会将锁内部的赋值指令重排。比如先执行了 loaded = true，还没来得及初始化 cfg 的字段。此时，另一个go routine执行到外层的 if !loaded，发现 loaded 已经是 true 了，于是直接返回了尚未初始化完毕的、残缺的 cfg 指针。当它使用这个 cfg 时，就会发生不可预期的崩溃或错误。
+
+- 踩的坑：
+小题A①，代码可能死循环，也有可能能结束。这和go的版本，cpu等运行时环境都有可能有关系。这次能跑过，不一定说明代码本身就毫无问题。
+小题A③，误解了“mutex不能被重入”的“重入”的含义。我以为一个go routine里不能对一个mutex进行两次Lock操作。“重入”是指在一对“Lock Unlock”之间，不能再插入一个“Lock”
+
+- 没搞懂：

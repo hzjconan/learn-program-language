@@ -130,6 +130,7 @@
 - Go 内存模型 & happens-before；`-race` 实战
 - **"不要用共享内存来通信"** 的真实含义与边界
 - **练习**：给一个故意有竞态的程序定位并修复，要求 `-race` 干净
+- 📖 讲解：[`lessons/D9.md`](lessons/D9.md) · 💻 练习：`internal/racefix/`（6 个并发问题）· 🔬 `go run ./cmd/syncdemo`
 
 ### D10 · context 与并发模式
 - `context.Context` 全套：取消、超时、截止时间、传值（以及为什么别拿它当 DI 容器）
@@ -256,7 +257,7 @@
 - [x] D6 测试与工程规范 —— `internal/cache` 用测试抓出 3 个植入 bug（覆盖率 100% 却全漏网）· `store.CopyAll` 补测到变异 4/4 · `genx.Filter` 预分配基准对比 + `Example` 函数 · `make check` 全绿
 - [x] D7 周综合项目：日志分析 CLI —— `internal/logx` 解析/聚合/可插拔输出 + `cmd/loganalyze` CLI · 覆盖率 98.7% · 变异测试 14/14 · `make check` 全绿 · **第 1 周完成**
 - [x] D8 goroutine 与 channel —— `internal/crawl` 有界并发爬取器（超时不泄漏 / worker pool / 逐层去重）· 覆盖率 96.7% · 变异测试 8/8 · `cmd/chandemo` 八段演示 · `make check` 全绿
-- [ ] D9 sync 与竞态
+- [x] D9 sync 与竞态 —— `internal/racefix` 修复 6 个并发问题（atomic/Lock/maps.Clone/OnceValue/wg.Go）· 覆盖率 100% · 变异测试 6/6 · `-race -count=10` 干净 · 首个外部依赖 x/sync
 - [ ] D10 context 与并发模式
 - [ ] D11 net/http 服务端
 - [ ] D12 JSON/配置/slog
