@@ -1322,3 +1322,341 @@ func (r *Registry) Snapshot() View { return View{m: *r.m.Load()} }  // 零拷贝
 小题A③，误解了“mutex不能被重入”的“重入”的含义。我以为一个go routine里不能对一个mutex进行两次Lock操作。“重入”是指在一对“Lock Unlock”之间，不能再插入一个“Lock”
 
 - 没搞懂：
+
+---
+
+## D10 · context 与并发模式（2026-08-27）
+
+讲解见 `lessons/D10.md`，练习在 `internal/pipeline/`。
+先跑 `go run ./cmd/ctxdemo`，第 ⑤ 段是题眼（cancel 停不掉任何东西）。
+
+**小题 A · context 语义谜题**
+
+五段，**先不要跑**，用脑子推。
+
+```go
+// ① 子的超时比父长
+func a() {
+	parent, cancelP := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelP()
+	child, cancelC := context.WithTimeout(parent, 10*time.Second)
+	defer cancelC()
+
+	start := time.Now()
+	<-child.Done()
+	fmt.Println(time.Since(start).Round(10*time.Millisecond), child.Err())
+}
+// 输出是？
+
+// ② 取消的方向
+func b() {
+	p, cancelP := context.WithCancel(context.Background())
+	c, cancelC := context.WithCancel(p)
+	defer cancelP()
+
+	cancelC()
+	fmt.Println("子:", c.Err(), " 父:", p.Err())
+}
+
+// ③ 这段会泄漏吗？为什么？
+func c() <-chan int {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for i := range 3 {
+			select {
+			case out <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+func caller() {
+	ch := c()
+	fmt.Println(<-ch)   // 只读一个就走
+}
+
+// ④ 下面哪个能真的取消掉正在跑的活？
+func d(ctx context.Context) {
+	// (1)
+	go func() { for { heavyCompute() } }()
+
+	// (2)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done(): return
+			default: heavyCompute()
+			}
+		}
+	}()
+
+	// (3)
+	resp, _ := http.Get("https://example.com/slow")
+	_ = resp
+
+	// (4)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://example.com/slow", nil)
+	resp2, _ := http.DefaultClient.Do(req)
+	_ = resp2
+}
+
+// ⑤ 这段代码有什么问题？（不止一个）
+type Server struct {
+	ctx context.Context
+	db  *sql.DB
+}
+func NewServer(ctx context.Context, db *sql.DB) *Server {
+	return &Server{ctx: ctx, db: db}
+}
+func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
+	uid := s.ctx.Value("userID").(string)
+	rows, _ := s.db.QueryContext(s.ctx, "SELECT ...", uid)
+	_ = rows
+}
+```
+
+我的答案：
+
+```
+① 输出 = 类似“已超时”之类的。
+
+② 输出 = 子：已经cancel, 父：没有cancel
+
+③ 不会 泄漏，因为超过timeout时间后（1小时），<-ctx.Done()会返回，go routine结束，对应的defer里面会close(out)。
+
+④ 能真正取消的是：( 2  4     )
+
+⑤
+问题1：s.ctx.Value("userID")用了普通字符串做value context的key，不能保证唯一，有可能被其他人覆盖，这里应该用非导出的struct实例作为key，比如 type myKey = struct{}, 然后用"myKey{}"作为key。
+问题2: 把context作为一个字段存到了Server这个struct里。context通常不应该被放到struct里，而是应该作为一个参数传到需要的方法里（而且通常应该作为方法的第一个参数）。这是因为，context生命周期往往是代表一次操作/一个客户端请求，而struct的生命周期有可能是整个进程的。在上面的示例里，Server代表着服务器和数据库连接的进程，假如context支持timeout，那么在某次请求timeout后，整个进程和数据库的连接都不可用了。
+```
+
+为什么（③④⑤ 请说清楚）：
+①
+因为父context的超时时间是50ms，虽然子context定义的超时时间远大于父的，但实际不能超过父的。
+
+②
+父context的cancel会传递到所有子context，反之则不会向上传播
+
+③
+已经在上面回答
+
+④
+(2)能被取消，是因为当context被cancel时，case <-ctx.Done()这行被执行到，go routine返回，不会执行下一次的heavyCompute()，但是如果当前heavyCompute正在跑，则只能等。
+(4)能被取消，是因为http.NewRequestWithContext创建的request本身会响应context的cancel
+
+⑤
+已经在上面回答
+
+
+实际跑完的验证结果（对了/错在哪）：
+
+**① ✅ 对**，实测 `50ms context deadline exceeded`，理由也对。
+
+**② ✅ 完全正确。**
+
+**③ ⚠️ 结论对（不泄漏），但理由错了 —— 而且错得很有价值。**
+
+我的理由：「超过 timeout（1 小时）后 `<-ctx.Done()` 返回，goroutine 结束」。
+**不会等 1 小时。** 实测：
+
+```
+函数已返回（此时 cancel 已经执行过了）
+   [A] ctx 已取消 → goroutine 退出       ← 立刻，不是 1 小时后
+```
+
+关键在 **`defer cancel()` 的执行时机：它在 `c()` 这个函数返回时就执行了**，
+而不是在返回的 channel 被读完之后。所以链条是：
+
+```
+c() 返回 → defer cancel() 立刻触发 → ctx 已经取消
+        → 那条 goroutine 第一次 select 就走 <-ctx.Done() 分支 → 退出
+```
+
+**这个 ctx 从函数返回那一刻起就是死的**，那 1 小时超时形同虚设。
+
+反过来验证 —— **去掉 `defer cancel()` 才是真泄漏**：
+
+```
+50 次调用后 goroutine: 基线 1 → 现在 51
+⚠️ 它们都卡在 out <- 1 上，要等【1 小时】超时才退
+手动 cancel 之后: 1  ← 立刻退了
+```
+
+⭐ **这题真正的教训**：在函数里创建 ctx、又把 channel 返回给调用方，**是个设计错误** ——
+ctx 的生命周期（函数作用域）和 channel 的生命周期（调用方决定）对不上。
+正确做法是**让调用方传 ctx 进来**，`Source`/`Stage`/`Merge` 的签名就是对的。
+
+**④ ⚠️ (2) 的措辞要精确，(4) 漏了前提。**
+
+**(2)** 「如果当前 heavyCompute 正在跑，则只能等」—— **完全正确**，这正是「协作式」的含义。
+但严格说 **(2) 不算「真正取消」，它是「不再开始下一次」**。真要中途停，
+`heavyCompute` 内部也得检查 ctx（比如分块处理，每块之间 check 一次）。
+
+**(4)** 「NewRequestWithContext 创建的 request 本身会响应 cancel」—— **方向对，主语不准**。
+
+响应取消的不是 `Request`，是 **`http.Client.Do` 在传输层**：ctx 取消时它会
+**中止底层 TCP 连接的读写**。所以：
+
+- ✅ **客户端立刻返回错误**，不再等
+- ⚠️ **服务端可能还在处理那个请求** —— 它只是发现连接断了
+
+（这正好是小题 B 第 1 问的答案。）
+
+**⑤ ⚠️ 找到的两个都对，但还有第三个。**
+
+问题 1（string 当 key）和问题 2（ctx 存进 struct）都答对了，
+问题 2 的解释很到位 —— 「Server 代表进程，context 代表一次请求，生命周期对不上」。
+
+**漏掉的第三个**：
+
+```go
+uid := s.ctx.Value("userID").(string)
+                              ^^^^^^^^ 单值类型断言，没用 comma-ok（D5 §5）
+```
+
+ctx 里没有这个值时 `Value` 返回 nil，断言直接 **panic** ——
+一个 HTTP handler 因为取不到 userID 就崩掉整个请求。
+
+而且这里更该做的是**用 `r.Context()` 而不是 `s.ctx`**：
+
+```go
+func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()              // ⭐ 请求级 ctx，客户端断开时自动取消
+	uid, ok := UserIDFrom(ctx)      // 类型安全的包装函数
+	if !ok {
+		http.Error(w, "未认证", http.StatusUnauthorized)
+		return
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT ...", uid)
+	...
+}
+```
+
+**`r.Context()` 是 Go 里获取请求级 ctx 的标准方式**（D11 会正面讲）。
+
+
+**小题 B · 设计题（写在下面，不用写代码）**
+
+1. D10 §5 说「取消不会停掉任何东西」。那 `db.QueryContext(ctx, ...)` 被取消时，
+   **数据库那边发生了什么**？你的连接会怎样？（提示：想想「不等它了」和「让它停下」的区别）
+   回答：连接可能会被中断（取决于db的实现，有没有正确响应context的cancel），数据库那边有没有中断正在执行sql也得看数据库的实现。
+
+2. `Run` 在取消时返回 `nil, ctx.Err()` —— 已经算出来的部分结果被丢弃了。
+   什么场景下这是对的？什么场景下应该**返回部分结果 + 错误**？
+   如果要返回部分结果，函数签名该怎么变？
+   回答：这个看业务场景，如果需要所有的任务都成功执行完才能进行下一步的话，那就应该fail-fast。反之，如果允许部分失败，则应该返回成功的那些+错误的那些（error应该包含错的job本身和错误信息）。
+
+3. 讲义说「不要把 ctx 存进 struct」，但也说「例外确实存在」。
+   举一个你觉得**可以**存的场景，说明为什么它不违背「context 是请求域的」这条。
+   回答：如果我们用一个struct来做请求的track，比如里面包含请求唯一id，请求开始时间，结束时间，每一个处理它的service name，这时候就可以把ctx放里面
+
+---
+
+**小题 B 批改**
+
+**1 · ⚠️ 说对了「取决于实现」，但把两件【确定】的事说成了不确定。**
+
+实际是三层，前两层确定：
+
+| 层 | 发生什么 | 确定吗 |
+|---|---|---|
+| **① 我的 Go 代码** | `QueryContext` 立刻返回 `context.DeadlineExceeded` | ✅ 确定 |
+| **② 连接** | `database/sql` 把这条连接**标记为坏的并关闭**（不还回池子） | ✅ 确定 |
+| **③ 数据库服务端** | 那条 SQL **可能还在跑** | ❌ 取决于驱动 |
+
+实测「不等它了 ≠ 让它停下」：
+
+```
+客户端: 30ms 后返回, err = context deadline exceeded
+  ⚠️ 此刻服务端【还在跑】
+  200ms 后：服务端把那 200ms 的活【完整跑完了】
+```
+
+⭐ **第 ② 层最值得记，因为它有性能后果**：取消一次查询 ≈ **销毁一条连接**。
+高频超时会让连接池不断重建连接 —— **你以为设超时是在保护自己，实际可能在压垮数据库**。
+
+第 ③ 层：好驱动会另开一条连接发取消指令（pgx 发 `CancelRequest`，MySQL 发 `KILL QUERY`），
+但那是**额外请求**，也可能失败。所以：**超时保证「你不再等」，不保证「对方停下来」**。
+一个 60 秒的慢查询，你 3 秒超时之后，数据库那边很可能还在烧满 60 秒。
+
+**2 · ✅ 判断对了，但没答「签名该怎么变」—— 那才是设计题的落点。**
+
+三种形态：
+
+```go
+// A：现在这样 —— 全有或全无
+func Run(...) ([]int, error)
+
+// B：部分结果 + 错误（最直接）
+func Run(...) (done []int, err error)     // err != nil 时 done 也可能非空
+
+// C：结果里带上每一项的成败（最清楚）
+type Item struct { In, Out int; Err error }
+func Run(...) ([]Item, error)             // error 只表示「整体级别的失败」
+```
+
+**B 有个隐蔽的坑**：Go 的惯例是「`err != nil` 时其他返回值不可信」，
+所以调用方看到 `err != nil` 通常直接 return，辛苦保住的部分结果被无声丢弃。
+**用 B 就必须在文档里大写强调。**
+
+**C 更符合 Go 惯例** —— D8 的 `crawl.Result{URL, Links, Err}` 就是这个形态。
+**错误是数据的一部分，不是控制流**（D9 §9.8）。
+
+**3 · ✅ 抓到了正确的判据，但举的例子恰好是反例。**
+
+「请求 track struct 是请求域的」—— 判据抓对了。**但恰恰不该存 ctx，因为方向反了**：
+request id、时间这些信息**应该放进 ctx**，而不是「ctx 放进那个 struct」。
+我描述的其实是 `WithValue` 的场景。
+
+真正合适的例子是**「这个 struct 本身就代表一次操作，且不会被复用」**：
+
+```go
+// ✅ 每次调用新建一个，用完就丢
+type queryBuilder struct {
+	ctx   context.Context      // 这次查询的 ctx
+	table string
+	where []condition
+}
+
+func (db *DB) Query(ctx context.Context) *queryBuilder {
+	return &queryBuilder{ctx: ctx}          // ⭐ 每次都是新的
+}
+q := db.Query(ctx).Where("a=1").Limit(10)   // 链式调用，ctx 得跟着走
+```
+
+它不违背规则，是因为**这个 struct 的生命周期 = 一次请求，和 ctx 完全对齐**。
+而 `Server`、`Repository`、`Client` 是**进程级**的，生命周期跨越无数请求 —— 存 ctx 才是错的。
+
+⭐ **判据：这个 struct 每次请求都新建一个吗？**
+是 → 可以存（但优先还是传参数）；否 → 绝对不能存。
+
+标准库的例子：`http.Request` 内部就有 ctx（`r.Context()` 取的就是它）——
+**因为每个请求都是新的 Request**。
+
+
+- 反直觉：
+- 踩的坑：
+pipeline.go里的merge方法，我一开始merge操作其实是串行的，写法如下：
+```go
+	go func() {
+		defer close(out)
+		
+		for _, in := range ins {
+			for v := range in {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- v:
+				}
+			}
+		}
+	}()
+```
+- 没搞懂：

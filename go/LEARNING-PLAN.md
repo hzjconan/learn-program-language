@@ -137,6 +137,7 @@
 - 取消信号如何贯穿整条调用链
 - 经典模式：pipeline、fan-in/fan-out、worker pool、信号量限流、优雅退出
 - **练习**：可取消的多阶段 pipeline，主协程取消后所有 goroutine 必须干净退出（用测试验证无泄漏）
+- 📖 讲解：[`lessons/D10.md`](lessons/D10.md) · 💻 练习：`internal/pipeline/` · 🔬 `go run ./cmd/ctxdemo`
 
 ### D11 · net/http 服务端
 - `http.Handler` / `HandlerFunc` / `ServeMux` 新版路由（`GET /items/{id}`）
@@ -258,7 +259,7 @@
 - [x] D7 周综合项目：日志分析 CLI —— `internal/logx` 解析/聚合/可插拔输出 + `cmd/loganalyze` CLI · 覆盖率 98.7% · 变异测试 14/14 · `make check` 全绿 · **第 1 周完成**
 - [x] D8 goroutine 与 channel —— `internal/crawl` 有界并发爬取器（超时不泄漏 / worker pool / 逐层去重）· 覆盖率 96.7% · 变异测试 8/8 · `cmd/chandemo` 八段演示 · `make check` 全绿
 - [x] D9 sync 与竞态 —— `internal/racefix` 修复 6 个并发问题（atomic/Lock/maps.Clone/OnceValue/wg.Go）· 覆盖率 100% · 变异测试 6/6 · `-race -count=10` 干净 · 首个外部依赖 x/sync
-- [ ] D10 context 与并发模式
+- [x] D10 context 与并发模式 —— `internal/pipeline` 可取消的三阶段流水线（Source/Stage/Merge/Run）· 覆盖率 100% · 变异测试 8/9 · `-race -count=10` 无泄漏 · `cmd/ctxdemo` 七段演示
 - [ ] D11 net/http 服务端
 - [ ] D12 JSON/配置/slog
 - [ ] D13 数据库
