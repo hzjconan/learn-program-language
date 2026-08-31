@@ -1660,3 +1660,393 @@ pipeline.go里的merge方法，我一开始merge操作其实是串行的，写�
 	}()
 ```
 - 没搞懂：
+
+---
+
+## D11 · net/http 服务端（2026-08-30）
+
+讲解见 `lessons/D11.md`，练习在 `internal/httpx/`。
+先跑 `go run ./cmd/httpdemo`，第 ⑥ 段是题眼（四个超时默认是「永不超时」）。
+
+**小题 A · HTTP 语义谜题**
+
+五段，**先不要跑**，用脑子推。
+
+```go
+// ① 这个 handler 返回什么状态码？响应体是什么？
+func a(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"partial":`)
+	if err := doSomething(); err != nil {          // 假设这里出错了
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "出错了")
+		return
+	}
+	fmt.Fprint(w, `true}`)
+}
+
+// ② 中间件顺序：下面两种写法，日志里记到的状态码分别是什么？
+//   A: Chain(mux, Logging, Recover)
+//   B: Chain(mux, Recover, Logging)
+// （mux 里的 handler 会 panic）
+
+// ③ 这段代码有什么问题？
+func c() {
+	resp, err := http.Get("https://api.example.com/data")
+	if err != nil {
+		return
+	}
+	var result Data
+	json.NewDecoder(resp.Body).Decode(&result)
+}
+
+// ④ 下面哪个 ResponseWriter 包装能正常支持 SSE（需要 Flush）？
+type w1 struct{ http.ResponseWriter; status int }
+func (w *w1) WriteHeader(c int) { w.status = c; w.ResponseWriter.WriteHeader(c) }
+
+type w2 struct{ rw http.ResponseWriter; status int }
+func (w *w2) Header() http.Header { return w.rw.Header() }
+func (w *w2) Write(b []byte) (int, error) { return w.rw.Write(b) }
+func (w *w2) WriteHeader(c int) { w.status = c; w.rw.WriteHeader(c) }
+
+// ⑤ 这个服务上线后会出什么问题？（不止一个）
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		process(body)
+		w.Write([]byte("ok"))
+	})
+	http.ListenAndServe(":8080", mux)
+}
+```
+
+我的答案：
+
+```
+① 状态码 =  200      响应体 = {"partial":出错了true}，content type是application/json
+
+② A 记到的状态码 =   500     B 记到的状态码 =  记不到
+
+③
+问题1: 没有超时设置
+问题2: err的时候，没有读完response body，会造成http/1.1的“连接复用”不可用
+
+④ 能支持 SSE 的是：(    w1    )
+
+⑤
+问题1：没有设置超时
+问题2: io.ReadAll碰到大请求时（比如传一个100G的文件），会直接打爆服务器内存。process(body)也一样的问题。
+```
+
+为什么（①②④⑤ 请说清楚）：
+①
+fmt.Fprint(w, `{"partial":`)这行已经让response code是200了
+并且也把content-type=application/json这个响应头写出去了。后面会接着打印出“出错了”和“true}”
+
+②
+A的写法，请求/响应流过的顺序是
+请求：logging -> recover -> mux
+响应 mux -> recover -> logging
+当mux发生panic时，不管是在请求阶段还是在响应阶段，都会被recover里的defer里面的"if recovered := recover(); recovered != nil"捕获到，假设它里面会把response code写成500，然后再回到logging，logging就能抓到500的code
+
+B的写法，求/响应流过的顺序是
+请求：recover -> logging -> mux
+响应 mux -> logging -> recover
+假设logging的defer里面没有“recover()”的处理，那么它本身也被panic打穿了，直到回到recover层。
+
+③
+已经在上面回答
+
+④
+w1用了“嵌入”，当要支持flush还需要额外包装下flush方法。
+w2只是一个包含了一个http.ResponseWriter类型字段的struct，编译器不知道它会有flush方法
+
+⑤
+已经在上面回答
+
+
+实际跑完的验证结果（对了/错在哪）：
+
+**① ⚠️ 状态码和 Content-Type 对，响应体多了一截。**
+
+真实 server 的结果：
+
+```
+状态码       = 200                      ✅ 我答对了
+Content-Type = "application/json"        ✅ 我答对了（第二次 Set 无效）
+响应体       = "{\"partial\":出错了"      ⚠️ 我答的是 {"partial":出错了true}
+```
+
+**没有 `true}`** —— `if` 分支里 `return` 了，`fmt.Fprint(w, `true}`)` 那行根本执行不到。
+
+服务端日志里还有一条：
+
+```
+http: superfluous response.WriteHeader call from main.a
+```
+
+标准库检测到了「重复 WriteHeader」并打日志，但**不 panic、不改状态码** —— §3 说的静默失效
+（准确说是「日志里有，客户端无感」）。
+
+> ⭐ **顺带一个重要发现**：`httptest.ResponseRecorder` 在这里**和真实 server 不一致**。
+> 它的 `Header()` 返回的是**当前的 map**，第二次 `Set` 会覆盖（所以 recorder 里显示 text/plain）；
+> 真实 Server 在第一次 `Write` 时就把 header 序列化发出去了，之后改 map 完全无效。
+>
+> **测 header 覆盖这类问题时，`httptest.NewRecorder()` 会骗你，要用 `httptest.NewServer`。**
+
+**② ✅ 全对，而且解释准确。**
+
+```
+A（Logging 外, Recover 内）: [Logging 记到 500]
+B（Recover 外, Logging 内）: []  ← 空的
+```
+
+「Logging 本身也被 panic 打穿了」—— **精确**。`next.ServeHTTP` panic 之后，
+Logging 后面的 `log(...)` 根本不执行，所以**一条日志都没有**，不是「记到了错的值」。
+
+这正是讲义 §4 的取舍：Logging 在外能记到 500，但它自己 panic 就没人兜。
+
+**③ ✅ 两个都对**（没超时、body 没读完影响连接复用）。补两个漏掉的：
+
+```go
+resp, err := http.Get(...)                    // ③ 忽略了 resp.Body.Close() —— 连接泄漏
+json.NewDecoder(resp.Body).Decode(&result)    // ④ 没检查 Decode 的错误
+```
+
+`bodyclose` linter 会抓第三条。
+
+**④ ❌ 两个都不支持。**
+
+```
+真实 ResponseWriter: true
+w1（嵌入接口）:      false
+w2（手动实现三个）:  false
+```
+
+**没有 `Flush` 方法的类型，都不满足 `http.Flusher`。** 我的解释是对的
+（「w1 还需要额外包装下 flush 方法」），但选项选错了 —— 题目问「哪个能**正常支持**」，
+答案是「都不能，两个都要补 `Flush`」。
+
+⭐ 这题的用意：**「嵌入接口」和「手动实现三个方法」在丢失可选接口这件事上是等价的。**
+很多人以为嵌入更「自动」一些，其实不是。
+
+**⑤ ⚠️ 两个都对，还漏了三个。**
+
+```go
+mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)        // ③ 忽略了错误
+	process(body)                         // ④ 没用 r.Context()
+	w.Write([]byte("ok"))
+})
+http.ListenAndServe(":8080", mux)         // ⑤ 没有 Recover 中间件
+```
+
+- **③ 忽略 `ReadAll` 的错误** —— 客户端中途断开时 `body` 是残缺的，却被当完整数据 process 了
+- **④ 没用 `r.Context()`** —— `process(body)` 很慢时，客户端早断了它还在跑（D10 §5）
+- **⑤ 路由没限制方法** —— `"/upload"` 是旧式模式，`GET`/`DELETE` 也能触发上传逻辑
+
+
+**小题 B · 设计题（写在下面，不用写代码）**
+
+1. `Logging` 需要包装 `ResponseWriter` 才能拿到状态码。这个包装会丢掉
+   `http.Flusher` / `http.Hijacker` 等可选接口（D5 §5 的可选接口模式）。
+   **你打算怎么处理？** 列出你知道的办法和各自的代价。
+   回答：
+   1. 直接在 `Logging` 中实现 `http.Flusher` / `http.Hijacker` 等可选接口。
+      代价：需要在 `Logging` 中实现 `Flush` 方法，可能会增加代码量。
+   2. 实现Unwrap方法，里面返回底层的ResponseWriter。
+
+2. `RateLimit` 现在是全局一个桶。要改成**按 IP 限流**，需要考虑哪些问题？
+   （提示：想想 map 会不会无限增长、锁的粒度、以及「IP 从哪来」）
+   回答：可以用一个map，key是ip，value是桶里的令牌数。这里要考虑ip太多map太大问题。可以跑一个go routine，每过n毫秒后，看看有没有超过一定时间没有被访问过的ip，有就从map里删掉它。对map操作的时候还要考虑并发锁的问题，理论上不同的ip之间不需要互相锁。我们可以健这么一个struct:
+   ```go
+   type ipBucket struct {
+	mu sync.Mutex
+	tokens int
+   }
+   ```
+   map的value存的是这个struct实例的指针，这样修改token数目的时候，只需要对每个ip对应的这个实例加锁。
+
+3. 讲义 §7 说四个超时必须配。但 `WriteTimeout` 有个陷阱：它从**读完请求头**开始算，
+   而不是从 handler 开始写响应算。**什么样的接口会撞上这个坑？** 怎么办？
+   回答：处理请求非常慢，但是最终返回的数据很少（写response快）的接口会碰到这个问题。碰到这个问题后，可以：
+   a. 增大timeout时间
+   b. 优化请求处理本身，比如，
+       用多个go routine能不能加速？
+	   能不能先返回一个task id，再提供一个api根据task id来查询进度/结果
+
+
+---
+
+**小题 B 批改**
+
+**1 · ⚠️ 两个办法都对，但漏了「代价」，而且第一条和讨论后的结论矛盾。**
+
+我写「直接实现 `http.Flusher` / **`http.Hijacker`**」—— 但 **`Hijacker` 不该裸转发**：
+转发之后连接被接管，`status`/`bytes` 再也不会更新，日志会变成 `status=0 bytes=0`
+而客户端实际收到了 418。**转发了就是在说谎。**
+
+完整的四个选项和代价：
+
+| 办法 | 代价 |
+|---|---|
+| ① 转发 `Flush` | 每个可选接口写一遍；**只对「不夺走控制权」的接口安全** |
+| ② 提供 `Unwrap` | 只对用 `ResponseController` 的调用方有效；**直接类型断言的老代码享受不到** |
+| ③ ①+②（我代码里实际做的） | 兼容新老调用方，两处都要维护 |
+| ④ 用 `httpsnoop` | 代码生成穷举所有组合，一个不丢；多一个依赖 + 不透明 |
+
+⭐ 还有个更本质的取舍：**「诚实地不支持」也是合理选择** —— 不转发 `Hijacker`，
+让 handler 的断言拿到 false 走降级分支，比转发之后给出错误的统计要好。
+
+**2 · ✅ 答得很好**，`map[string]*ipBucket` + 每 IP 一把锁的思路完全正确。
+
+但漏了提示里的第三点 —— **「IP 从哪来」**，而这是三问里**唯一有安全后果**的：
+
+```go
+ip := r.RemoteAddr        // ← TCP 连接的对端地址
+```
+
+**前面有 nginx / LB / CDN 时，所有请求的 RemoteAddr 都是那个代理的 IP**
+→ 「按 IP 限流」退化成全局限流，一个用户就能打满所有人的额度。
+
+那用 `X-Forwarded-For`？**它可以被客户端随便伪造**：
+
+```
+X-Forwarded-For: 1.2.3.4      ← 攻击者每次换一个，无限绕过限流
+```
+
+正确做法是配置**「信任几层代理」**，从 XFF 右边往左数：
+
+```
+X-Forwarded-For: 伪造的, 真实客户端IP, 代理1, 代理2
+                          ↑ 信任 2 层的话，从右数第 3 个才是真的
+```
+
+**关键是这个「信任层数」必须是配置项，不能猜。**
+
+另外两个漏掉的细节：
+
+**① 还需要一把外层锁保护 map 本身**
+
+```go
+type ipLimiter struct {
+	mu      sync.RWMutex           // ⭐ 保护 map 结构（查找/增删）
+	buckets map[string]*ipBucket   // 每个 bucket 有自己的锁
+}
+```
+
+「不同 IP 之间不需要互相锁」是对的，但**读写 map 这个数据结构本身**仍然要锁。
+这是**两层锁**：外层 RWMutex（读多写少）+ 内层每桶一把。
+
+**② 清理 goroutine 谁来停** —— 长期运行的 goroutine 要有退出路径（D10）：
+
+```go
+select {
+case <-ticker.C:   cleanup()
+case <-ctx.Done(): return      // ⭐ 否则测试里反复创建 limiter 就泄漏
+}
+```
+
+**3 · ⚠️ 说对了一类，漏了最典型的一类。**
+
+「处理很慢但响应很小」—— **对**，实测 `/slow` 确实被砍（EOF）。
+
+**但最典型的是 SSE / 长轮询 / 流式响应**（实测，全局 WriteTimeout=200ms）：
+
+```
+/slow        ❌ EOF                       ← 我说的那类
+/sse         ⚠️ 只收到 45/75 字节，中途断   ← 最典型的一类，我漏了
+/sse-fixed   ✅ 完整收到 75 字节            ← SetWriteDeadline 救回来了
+```
+
+**它们本来就要长时间保持连接** —— SSE 可能推一整天。`WriteTimeout` 从读完请求头
+开始算，所以**不管推得多快，到点就砍**。同类的还有大文件下载、WebSocket 握手前。
+
+我答的两条（增大 timeout、改异步任务）都是**绕**而不是**解**：
+
+- 增大 timeout → Slowloris 防护就废了，所有接口一起变松
+- 改异步任务 → 架构改动大，而且不适用于 SSE（它天生就是长连接）
+
+**直接的解法是 `http.ResponseController.SetWriteDeadline`**：
+
+```go
+rc := http.NewResponseController(w)
+for {
+	rc.SetWriteDeadline(time.Now().Add(2 * time.Second))   // ⭐ 每次推送前往后推
+	fmt.Fprintf(w, "data: %s
+
+", event)
+	rc.Flush()
+}
+```
+
+⭐ 这是 `ResponseController` 的第二个用途（第一个是穿透包装拿 Flusher）：
+**让单个 handler 覆盖全局超时**。
+
+> **全局设紧，个别放宽** —— 比「全局设松」安全得多。
+
+
+**📄 配套示例：`internal/httpx/events.go`**
+
+按第 3 问写了一个可运行的 SSE 端点（Store 变更实时推送），它同时踩中四个坑：
+
+| 坑 | 在示例里怎么处理 |
+|---|---|
+| **D11 §7** WriteTimeout 从读完请求头算 | `writeAndFlush` 每次写之前 `SetWriteDeadline` |
+| **D11 §5** 包装 ResponseWriter 丢 Flusher | 用 `ResponseController` 而不是 `w.(http.Flusher)` |
+| **D10 §5** 客户端断开 | `select` 里有 `<-r.Context().Done()` 分支 |
+| **D9 §11** AB-BA 死锁 | 广播在**解锁之后**做，且 `subs` 有自己的锁 |
+
+**两条硬规则**（违反任何一条都会拖垮服务）：
+
+1. **绝不能持有 `Store.mu` 时广播** —— 广播要拿 `subs.mu`，而订阅者可能正好在调
+   `Store.Get`（要拿 `Store.mu`），两把锁顺序相反就是 AB-BA 死锁。
+   所以 `Put`/`Delete` 里**没有用 `defer Unlock`**，而是显式解锁后再广播。
+
+2. **发送必须非阻塞**（`select` + `default`）—— 一个卡住的客户端（手机切后台）会让
+   它的 channel 填满，阻塞发送的话**整个 Store 的写入全卡死**，一个慢客户端拖垮所有人。
+
+「丢事件」是**有意的取舍**：宁可让慢客户端丢几条，也不能让它拖住写入方。
+真要保证不丢，就得给每个订阅者一个持久队列（那是另一个系统了）。
+
+**实测验证**（全局 `WriteTimeout=150ms`，事件间隔 200ms —— 每次都超过超时）：
+
+```
+响应头: Content-Type="text/event-stream" Transfer-Encoding=[chunked]  ← flush 生效
+收到的事件流:
+   event: put     data: {"key":"k","value":"a"}
+   event: put     data: {"key":"k","value":"b"}
+   event: put     data: {"key":"k","value":"c"}
+   event: put     data: {"key":"k","value":"d"}
+   event: delete  data: {"key":"k","value":""}
+✅ 4 次 put + 1 次 delete 一条没丢
+✅ 1000 次写入没被慢订阅者阻塞
+✅ 10 次连接并断开：订阅者数量 0 → 0（没泄漏）
+```
+
+其他值得记的细节：
+
+- **`Subscribe` 返回「取消函数」而不是「取消方法」** —— `context.WithCancel` 的同款设计，
+  调用方拿到什么就能取消什么，不用额外记 id
+- **取消函数用 `sync.Once` 保证幂等** —— 调用方很可能 defer 一次、出错路径再调一次，
+  重复 `close` 会 panic（D8 §3）
+- **心跳（`: ping`）** —— 反向代理会掐掉空闲太久的连接；
+  `writeWindow` 必须**大于** `heartbeat`，否则心跳还没发连接就被砍了
+- **`SetWriteDeadline` 可能返回 `ErrNotSupported`** —— `httptest.ResponseRecorder`
+  就不支持。这不是致命错误，继续写就行，只是失去了「单独放宽超时」的能力
+
+
+- 反直觉：
+- 踩的坑：
+输出response的时候，如果手动拼json会碰到“注入”问题。我之前是这么写的：
+```go
+w.Write([]byte({"key":"+ key +","value":"+ value +"})) 
+```
+在 value 含 " / \n / \ 时会拼出非法 JSON。
+应该用
+```go
+json.NewEncoder(responseWriter).Encode(value)
+```
+- 没搞懂：

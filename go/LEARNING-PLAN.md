@@ -146,6 +146,7 @@
 - 优雅关闭 `Shutdown`
 - 客户端：`http.Client` 复用、连接池、超时、重试
 - **练习**：手写一套中间件（日志 / 恢复 / 请求 ID / 限流），不用任何框架
+- 📖 讲解：[`lessons/D11.md`](lessons/D11.md) · 💻 练习：`internal/httpx/` · 🔬 `go run ./cmd/httpdemo`
 
 ### D12 · JSON、配置、结构化日志、错误分层
 - `encoding/json` 的 tag、`omitempty`、自定义 `Marshaler`、数字精度坑
@@ -260,7 +261,7 @@
 - [x] D8 goroutine 与 channel —— `internal/crawl` 有界并发爬取器（超时不泄漏 / worker pool / 逐层去重）· 覆盖率 96.7% · 变异测试 8/8 · `cmd/chandemo` 八段演示 · `make check` 全绿
 - [x] D9 sync 与竞态 —— `internal/racefix` 修复 6 个并发问题（atomic/Lock/maps.Clone/OnceValue/wg.Go）· 覆盖率 100% · 变异测试 6/6 · `-race -count=10` 干净 · 首个外部依赖 x/sync
 - [x] D10 context 与并发模式 —— `internal/pipeline` 可取消的三阶段流水线（Source/Stage/Merge/Run）· 覆盖率 100% · 变异测试 8/9 · `-race -count=10` 无泄漏 · `cmd/ctxdemo` 七段演示
-- [ ] D11 net/http 服务端
+- [x] D11 net/http 服务端 —— `internal/httpx` 手写四个中间件（RequestID/Recover/Logging/RateLimit）+ KV API + SSE 示例 · 变异测试 9/10 · `-race` 干净 · `cmd/httpdemo` 七段演示
 - [ ] D12 JSON/配置/slog
 - [ ] D13 数据库
 - [ ] D14 周综合项目：REST API 服务
