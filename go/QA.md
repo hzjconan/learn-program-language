@@ -26,6 +26,8 @@
 | [15](#15-无缓冲-channel-什么时候会死锁) | 无缓冲 channel 什么时候会死锁 | 并发 |
 | [16](#16-setwritedeadline两次写之间隔很久会不会超时) | `SetWriteDeadline`：两次写之间隔很久，会不会超时 | 网络 |
 | [17](#17-writetimeout-和-setwritedeadline-同时存在时谁说了算) | `WriteTimeout` 和 `SetWriteDeadline` 同时存在时谁说了算 | 网络 |
+| [18](#18-包装-sloghandler-为什么会丢字段) | 包装 `slog.Handler` 为什么会丢字段 | 标准库 |
+| [19](#19-非导出类型上的大写方法算导出吗) | 非导出类型上的大写方法，算导出吗 | 工程 |
 
 ---
 
@@ -1031,3 +1033,181 @@ keep-alive 复用同一条连接的实测：
 > 不要为了迁就一个 SSE 接口，把全局 `WriteTimeout` 调大或干脆设成 0 ——那等于所有接口都失去保护。
 
 （相关：[#16](#16-setwritedeadline两次写之间隔很久会不会超时)、D11 §8 四个超时）
+
+
+---
+
+## 18. 包装 `slog.Handler` 为什么会丢字段
+
+**一句话**：`slog.Handler` 有**四个**方法，其中 `WithAttrs` / `WithGroup` **返回 Handler 自身**。只重写 `Handle` 的话，一调 `.With(...)` 包装层就被剥掉了——而且**没有任何征兆**。
+
+### 场景
+
+给日志自动带上 ctx 里的 request ID，标准写法是包一层 Handler：
+
+```go
+type ctxHandler struct{ slog.Handler }
+
+func (h ctxHandler) Handle(ctx context.Context, r slog.Record) error {
+	if id, ok := RequestIDFrom(ctx); ok {
+		r.AddAttrs(slog.String("request_id", id))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+```
+
+### 实测：`.With()` 之后 `request_id` 消失
+
+```
+--- A：只重写 Handle ---
+{"msg":"直接记","request_id":"req-42"}                  ✅
+{"msg":"先 With 再记","user":"alice"}                    ⚠️ 没了
+{"msg":"先 WithGroup 再记"}                              ⚠️ 没了
+
+--- B：三个都重写 ---
+{"msg":"直接记","request_id":"req-42"}                  ✅
+{"msg":"先 With 再记","user":"alice","request_id":"req-42"}      ✅
+{"msg":"先 WithGroup 再记","http":{"request_id":"req-42"}}       ✅
+```
+
+### 为什么
+
+```go
+type Handler interface {
+	Enabled(context.Context, Level) bool
+	Handle(context.Context, Record) error
+	WithAttrs([]Attr) Handler        // ← 返回 Handler
+	WithGroup(string) Handler        // ← 返回 Handler
+}
+```
+
+嵌入 `slog.Handler` 后，`WithAttrs`/`WithGroup` 被自动提升——但它们是**内层 handler 的**方法，返回的也是**内层那个没被包装的** handler：
+
+```
+slog.New(ctxHandler{base})       handler = ctxHandler{base}    ✅
+    .With("user", "alice")       handler = base                ❌ 包装脱落
+```
+
+⚠️ 而 `logger.With(...)` 正是「给每个请求做日志上下文」的标准手法（讲义 D12 §3），**最推荐的用法恰好触发这个 bug**。
+
+### 修法
+
+把两个返回 `Handler` 的方法重写，结果重新包一层：
+
+```go
+func (h ctxHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return ctxHandler{h.Handler.WithAttrs(attrs)}
+}
+
+func (h ctxHandler) WithGroup(name string) slog.Handler {
+	return ctxHandler{h.Handler.WithGroup(name)}
+}
+```
+
+`Enabled` **不用重写**——它返回 `bool`，不涉及包装层。
+
+### ⭐ 一条可复用的判据
+
+> 包装一个接口时，**逐个看它的方法签名：凡是返回该接口自身类型的，都必须重写并把结果重新包一层**，否则包装层会在第一次调用后脱落。
+
+对照几个常见接口：
+
+| 接口 | 返回自身类型的方法 | 要小心吗 |
+|---|---|---|
+| `slog.Handler` | `WithAttrs`、`WithGroup` | ⚠️ 要 |
+| `http.ResponseWriter` | 无 | 不用（但有另一种漏法，见下） |
+| `io.Reader` / `io.Writer` | 无 | 不用 |
+| `context.Context` | 无 | 不用 |
+
+### 和 D11 那个坑的关系
+
+这和 D11 §5 的 `responseRecorder` 是**同一类问题**：嵌入接口 + 只重写关心的方法。但漏的方式不同：
+
+| | D11 `responseRecorder` | 这里 `ctxHandler` |
+|---|---|---|
+| 漏什么 | **可选接口**（Flusher/Hijacker…）没被提升 | **包装层**被 `With*` 剥掉 |
+| 怎么发现 | 类型断言失败，SSE 不刷新 | **没有征兆**，日志里静默少一个字段 |
+| 修法 | 加 `Unwrap()`，用 `ResponseController` | 重写 `WithAttrs`/`WithGroup` |
+
+**第二行是重点**：D11 那次至少还有个可观察的故障；这次只是日志少了个字段，线上排查时你甚至不会想到是包装层的问题。
+
+（相关：D11 §5 嵌入接口的代价、D12 §3 从 ctx 提取字段）
+
+
+---
+
+## 19. 非导出类型上的大写方法，算导出吗
+
+**一句话**：不算。**大写只是「可导出」的必要条件，不是充分条件**——方法能不能被外部访问，还要看它所属的类型能不能被外部**命名**。
+
+### 场景
+
+包装 `slog.Handler` 时（见 [#18](#18-包装-sloghandler-为什么会丢字段)）会写出这么一坨：
+
+```go
+type ctxHandler struct{ slog.Handler }                              // 小写
+
+func (h ctxHandler) Handle(...) error                               // 大写
+func (h ctxHandler) WithAttrs(...) slog.Handler                     // 大写
+func (h ctxHandler) WithGroup(...) slog.Handler                     // 大写
+
+func WithRequestID(h slog.Handler) slog.Handler { return ctxHandler{h} }   // 导出的入口
+```
+
+看着别扭：类型藏起来了，方法却全大写，像是把三个方法暴露了出去。
+
+**首先，方法名没得选**：`slog.Handler` 接口声明的就是 `Handle`/`WithAttrs`/`WithGroup`，写成小写就不满足接口。
+
+### 实测：外部到底能做什么
+
+拿一个等价的小例子（非导出 `greeter` + 导出接口 `Greeter` + 构造函数 `New`）：
+
+| 外部包想做的事 | 结果 |
+|---|---|
+| 通过接口调 `g.Greet()` | ✅ `hello, world` |
+| 直接写 `inner.greeter` | ❌ `name greeter not exported by package inner` |
+| `go doc` 里能看到 | ❌ 只列出 `Greeter` 和 `New` |
+
+```
+$ go doc ./inner
+package inner // import "ex/inner"
+
+type Greeter interface{ ... }
+    func New(name string) Greeter
+```
+
+`greeter` 和它的 `Greet` **一个字都不出现**。
+
+⭐ **`go doc` 的输出就是「这个包对外承诺了什么」的权威度量。** 拿不准某个东西算不算公开 API，跑一下 `go doc` 最直接。
+
+### 为什么
+
+> **Go 的导出规则按标识符逐个判定，但可达性是「链式」的。**
+
+`ctxHandler.Handle` 这个标识符是大写的，可它前面那截 `ctxHandler` 是小写的——整条路在第一段就断了。外部连类型名都写不出来，自然拿不到它的方法；唯一通路是你导出的接口和构造函数。
+
+### 这是标准库的常规做法
+
+```go
+// errors 包
+type errorString struct{ s string }            // 非导出
+func (e *errorString) Error() string { ... }   // 大写 —— error 接口要求的
+func New(text string) error { ... }            // 导出的构造函数
+```
+
+`context` 包同理：`WithCancel` 返回的 `*cancelCtx` 是非导出的，但 `Deadline`/`Done`/`Err`/`Value` 全大写，因为 `context.Context` 接口这么要求。
+
+**这个组合恰恰是收窄 API 的手段**：外部只知道「有个 `slog.Handler`」，不知道内部叫什么、什么结构。以后你想给 `ctxHandler` 改名、加字段、甚至换成完全不同的实现，都不算破坏兼容——**它从来就不在公开面上**。
+
+### ⚠️ 反过来才要小心
+
+在**导出的**类型上加大写方法，那是实打实扩大了 API 面：
+
+```go
+type Store struct{ ... }                 // 导出
+func (s *Store) Debug() string { ... }   // ⚠️ 这个是真的公开了，以后删不掉
+```
+
+**判据**：加方法前先看接收者类型是大写还是小写。小写随便加，大写要当成对外承诺。
+
+（相关：[#18](#18-包装-sloghandler-为什么会丢字段)、[#1](#1-cmd-目录是-go-的命名规范吗) 工程约定）

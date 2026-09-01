@@ -263,7 +263,7 @@
 - [x] D9 sync 与竞态 —— `internal/racefix` 修复 6 个并发问题（atomic/Lock/maps.Clone/OnceValue/wg.Go）· 覆盖率 100% · 变异测试 6/6 · `-race -count=10` 干净 · 首个外部依赖 x/sync
 - [x] D10 context 与并发模式 —— `internal/pipeline` 可取消的三阶段流水线（Source/Stage/Merge/Run）· 覆盖率 100% · 变异测试 8/9 · `-race -count=10` 无泄漏 · `cmd/ctxdemo` 七段演示
 - [x] D11 net/http 服务端 —— `internal/httpx` 手写四个中间件（RequestID/Recover/Logging/RateLimit）+ KV API + SSE 示例 · 变异测试 9/10 · `-race` 干净 · `cmd/httpdemo` 七段演示
-- [ ] D12 JSON/配置/slog
+- [x] D12 JSON/配置/slog —— `internal/apperr` 错误分层（Kind→HTTP 映射）+ `internal/config` 环境变量加载与脱敏 · `httpx` 改造成 slog（ctxHandler 自动注入 request ID）· 变异测试 apperr 17/17 · httpx 8/8 · `cmd/jsondemo` 七个 JSON 坑 + 六段 slog
 - [ ] D13 数据库
 - [ ] D14 周综合项目：REST API 服务
 - [ ] D15 测试进阶

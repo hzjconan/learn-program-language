@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"sync"
@@ -86,6 +87,76 @@ func RequestIDFrom(ctx context.Context) (string, bool) {
 	}
 	return s, true
 }
+
+// ctxHandler 包住任意 slog.Handler，从 ctx 里取出 request ID 加到每条日志上。
+//
+// ⭐ 好处是【业务代码什么都不用做】—— 只要用 XxxContext 系列方法，
+// 自己打的日志也会自动带上 ID，不用一层层把 ID 传下去。
+//
+// ⚠️ ctx 是【唯一】的来源，故意不从请求头兜底 —— 理由见 WithRequestID。
+type ctxHandler struct{ slog.Handler }
+
+func (h ctxHandler) Handle(ctx context.Context, r slog.Record) error {
+	if id, ok := RequestIDFrom(ctx); ok {
+		r.AddAttrs(slog.String("request_id", id))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// WithAttrs / WithGroup 必须重写，并且把结果【重新包一层】。
+//
+// ⚠️ slog.Handler 有四个方法，其中这两个【返回 Handler 自身】。只嵌入不重写的话，
+// 它们返回的是【内层那个没被包装的】 handler，包装层当场脱落：
+//
+//	slog.New(ctxHandler{base})     handler = ctxHandler{base}   ✅
+//	    .With("user", "alice")     handler = base               ❌ request_id 没了
+//
+// 而 logger.With(...) 正是「给每个请求做日志上下文」的推荐用法 ——
+// 最该用的写法恰好触发这个 bug，而且【没有任何征兆】，只是日志里静默少一个字段。
+//
+// 这和 responseRecorder 那个坑同源（嵌入接口 + 只重写关心的方法），
+// 但那次至少还有可观察的故障（SSE 不刷新），这次没有。
+//
+// ⭐ 判据：包装接口时逐个看方法签名，凡是返回该接口自身类型的都要重写并重新包一层。
+// Enabled 返回 bool，不涉及包装层，不用重写。
+//
+// TestHTTPX_WithRequestIDSurvivesWith 锁住这个行为。
+func (h ctxHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return ctxHandler{h.Handler.WithAttrs(attrs)}
+}
+
+func (h ctxHandler) WithGroup(name string) slog.Handler {
+	return ctxHandler{h.Handler.WithGroup(name)}
+}
+
+// WithRequestID 让 h 产出的每条日志自动带上 ctx 里的 request ID。
+//
+// 用法（在启动时组装一次）：
+//
+//	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
+//	logger := slog.New(httpx.WithRequestID(base))
+//	h := Chain(router, RequestID, Logging(logger), ...)
+//
+// 两个前提：RequestID 中间件必须在 Logging 【外层】（否则 ctx 里还没 ID），
+// 且记日志必须用 XxxContext 系列（普通的 Info 传的是 context.Background()）。
+//
+// # 为什么【不】从请求头兜底
+//
+// 改造前 Logging 里有两个来源：① ctx，② 拿不到就读 r.Header 的 X-Request-ID，
+// 用来覆盖「没装 RequestID 中间件、但上游网关注入了 ID」的场景。现在只剩 ①。
+//
+// 这是【刻意】去掉的：
+//
+//   - RequestID 中间件本身就会复用上游请求头里的 ID（见它的实现），
+//     只要装了它，②能覆盖的场景①全都覆盖到了
+//   - 唯一剩下的场景是「根本没装 RequestID 中间件」—— 那是【配置错误】。
+//     此时日志里没有 request_id 是个【有用的信号】，兜底反而会把错误藏起来
+//   - 而且 Handle 只拿得到 ctx，拿不到 *http.Request。要兜底就得让 request ID
+//     重新变成两个来源，和「统一由 Handler 注入」的设计打架
+//
+// ⭐ 一般原则：兜底要看它藏起来的是什么。藏「偶发的缺失」值得，
+// 藏「配置错误」不值得 —— 后者你希望它尽早暴露。
+func WithRequestID(h slog.Handler) slog.Handler { return ctxHandler{h} }
 
 // genRequestID 生成一个随机 request ID。
 func genRequestID() string {
@@ -157,22 +228,6 @@ func Recover(onPanic PanicHandler) Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-// LogEntry 是一条访问日志。
-type LogEntry struct {
-	// RequestID 是这次请求的 ID（RequestID 中间件放进 ctx 的那个）。
-	RequestID string
-	// Method 是 HTTP 方法。
-	Method string
-	// Path 是请求路径。
-	Path string
-	// Status 是响应状态码。
-	Status int
-	// Bytes 是响应体字节数。
-	Bytes int
-	// Duration 是处理耗时。
-	Duration time.Duration
 }
 
 // responseRecorder 包装 http.ResponseWriter，记录状态码和响应体大小。
@@ -261,47 +316,45 @@ var _ interface{ Unwrap() http.ResponseWriter } = (*responseRecorder)(nil)
 // 提示：包装 http.ResponseWriter（§5）。用嵌入，只重写你关心的方法。
 //
 // ⚠️ 包装会丢掉可选接口（Flusher / Hijacker）—— review 时我会问你怎么处理。
-func Logging(log func(LogEntry)) Middleware {
+func Logging(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rr := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rr, r)
 
-			// 请求 ID 有三个可能的来源，实测各自在什么链路下才有值：
+			// ⭐ 用 InfoContext 而不是 Info —— 普通的 Info 传的是 context.Background()，
+			// WithRequestID 那个 Handler 就提取不到 request ID 了。
 			//
-			//	链路                              ctx   响应头  请求头
-			//	① RequestID 在【外】层             ✅     ✅      ❌
-			//	② RequestID 在【内】层             ❌     ✅      ❌
-			//	③ 没装 RequestID，上游网关传了 ID   ❌     ❌      ✅
-			//
-			// ①② 的差别在于 r.WithContext(ctx) 造的是一个【新的 *http.Request】，
-			// 只传给内层；Logging 手上还是老的 r，ctx 里没有 ID。
-			// 而 w 是【全链路共享的一个对象】，所以响应头哪一层都读得到。
-			// ⭐ r 逐层传递（不可变），w 全程共享 —— 这个区别值得记住。
-			//
-			// 这里【只取 ① 和 ③】，故意不从响应头兜底：
-			//   ① 最可信 —— RequestID 中间件已经做过「复用上游 or 新生成」的决策
-			//   ③ 覆盖「根本没装这个中间件、但上游网关注入了 ID」的合理场景
-			//      （nginx / service mesh 通常都会注入 X-Request-ID）
-			//   ② 说明【中间件顺序配错了】—— RequestID 应该在 Logging 外层，
-			//      否则 Recover 写 500 时也拿不到 ID。这时日志留空是个有用的信号，
-			//      兜底反而会把配置错误藏起来。
-			//
-			// 顺序不能反：请求头是客户端可伪造的，最不可信，只能垫底。
-			reqID, _ := RequestIDFrom(r.Context())
-			if reqID == "" {
-				reqID = r.Header.Get(RequestIDHeader)
-			}
+			// ⭐ 用强类型 attr（slog.String/Int/Float64）而不是 "k", v 键值对：
+			// 这是每个请求都要走的热路径，强类型不走反射；而且键值对形式
+			// 参数个数写错会静默变成 !BADKEY，编译器不管。
+			logger.InfoContext(r.Context(), "请求完成",
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Int("status", rr.status),
+				slog.Int("bytes", rr.bytes),
 
-			log(LogEntry{
-				RequestID: reqID,
-				Method:    r.Method,
-				Path:      r.URL.Path,
-				Status:    rr.status,
-				Bytes:     rr.bytes,
-				Duration:  time.Since(start),
-			})
+				// 耗时记成【毫秒浮点】，而不是 slog.Duration 或整数毫秒。
+				//
+				// ⚠️ slog.Duration(d) 在 JSON 里输出的是【纳秒整数】（15ms → 15000000）,
+				// 字段名里又看不出单位 —— 日志平台上没人知道那是什么量纲。
+				//
+				// ⚠️ d.Milliseconds() 更糟：它是 int64 截断除法，实测
+				//    45µs  → 0
+				//    800µs → 0
+				// 亚毫秒请求全被记成 0，算 p50 会得到一堆 0，快慢完全看不出来。
+				//
+				// 毫秒浮点三者兼顾：45µs → 0.045，1.2s → 1200。
+				// 名字里带单位（_ms）、可聚合、亚毫秒不丢。
+				//
+				// 用 .Nanoseconds() 而不是直接 float64(d)：后者也对（Duration
+				// 底层就是 int64 纳秒），但读的人得先想清楚底层单位才敢确认。
+				//
+				// ⭐ 一般规则（D7）：给【机器】读的日志，时间一律用固定单位的数字，
+				// 单位写进字段名。d.String() 那种 "45µs"/"1.2s" 是不同量纲的字符串，
+				// 没法排序也没法求和，只适合给人看的 Text 日志。
+				slog.Float64("duration_ms", float64(time.Since(start).Nanoseconds())/1e6))
 		})
 	}
 }

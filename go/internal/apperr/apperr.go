@@ -10,7 +10,10 @@
 // HTTP 状态码是传输细节。映射函数放在 http.go 里，领域部分保持干净。
 package apperr
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Kind 是错误的类别。它描述「出了什么性质的问题」，不描述怎么告诉客户端。
 type Kind int
@@ -35,7 +38,24 @@ const (
 // "unauthorized" / "forbidden" / "rate_limited"；
 // 未知的 Kind 返回 fmt.Sprintf("kind(%d)", int(k))。
 func (k Kind) String() string {
-	panic("TODO(D12): 实现 Kind.String")
+	switch k {
+	case KindInternal:
+		return "internal"
+	case KindNotFound:
+		return "not_found"
+	case KindInvalid:
+		return "invalid"
+	case KindConflict:
+		return "conflict"
+	case KindUnauthorized:
+		return "unauthorized"
+	case KindForbidden:
+		return "forbidden"
+	case KindRateLimited:
+		return "rate_limited"
+	default:
+		return fmt.Sprintf("kind(%d)", int(k))
+	}
 }
 
 // Error 是领域错误。
@@ -68,7 +88,10 @@ type Error struct {
 // ⚠️ 注意这个字符串是给【开发者】看的（日志、%v），所以带上 Err 是对的。
 // 面向用户的那一份由 HTTPStatus 单独返回，两者不要混。
 func (e *Error) Error() string {
-	panic("TODO(D12): 实现 Error.Error")
+	if e.Err == nil {
+		return e.Message
+	}
+	return fmt.Sprintf("%s: %s", e.Message, e.Err.Error())
 }
 
 // Unwrap 让 errors.Is / errors.As 能穿透到底层错误（D2）。
@@ -78,7 +101,7 @@ func (e *Error) Error() string {
 // ⚠️ 少了这个方法，`errors.Is(err, sql.ErrNoRows)` 在包装之后就找不到了 ——
 // 整条 %w 链在这里断掉。
 func (e *Error) Unwrap() error {
-	panic("TODO(D12): 实现 Error.Unwrap")
+	return e.Err
 }
 
 // ---------- 构造函数 ----------
@@ -90,32 +113,32 @@ func (e *Error) Unwrap() error {
 
 // NotFound 表示请求的资源不存在。
 func NotFound(msg string, err error) *Error {
-	panic("TODO(D12): 实现 NotFound")
+	return &Error{Kind: KindNotFound, Message: msg, Err: err}
 }
 
 // Invalid 表示请求本身有问题。
 func Invalid(msg string, err error) *Error {
-	panic("TODO(D12): 实现 Invalid")
+	return &Error{Kind: KindInvalid, Message: msg, Err: err}
 }
 
 // Conflict 表示和当前状态冲突。
 func Conflict(msg string, err error) *Error {
-	panic("TODO(D12): 实现 Conflict")
+	return &Error{Kind: KindConflict, Message: msg, Err: err}
 }
 
 // Unauthorized 表示没有身份或身份无效。
 func Unauthorized(msg string, err error) *Error {
-	panic("TODO(D12): 实现 Unauthorized")
+	return &Error{Kind: KindUnauthorized, Message: msg, Err: err}
 }
 
 // Forbidden 表示有身份但没权限。
 func Forbidden(msg string, err error) *Error {
-	panic("TODO(D12): 实现 Forbidden")
+	return &Error{Kind: KindForbidden, Message: msg, Err: err}
 }
 
 // Internal 表示服务端自己的问题。
 func Internal(msg string, err error) *Error {
-	panic("TODO(D12): 实现 Internal")
+	return &Error{Kind: KindInternal, Message: msg, Err: err}
 }
 
 // ---------- 查询 ----------
@@ -137,7 +160,9 @@ func Internal(msg string, err error) *Error {
 // 如果外层刻意用 apperr.Internal 重新包装了一个 NotFound，
 // 说明外层【决定】把它降级成内部错误，应该听外层的。
 func KindOf(err error) (Kind, bool) {
-	panic("TODO(D12): 实现 KindOf")
+	var e *Error
+	if ok := errors.As(err, &e); ok {
+		return e.Kind, true
+	}
+	return KindInternal, false
 }
-
-var _ = fmt.Sprintf // 实现完 Kind.String 后这行可以删掉

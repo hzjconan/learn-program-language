@@ -1,6 +1,10 @@
 package apperr
 
-import "net/http"
+import (
+	"context"
+	"errors"
+	"net/http"
+)
 
 // GenericMessage 是兜底的用户可见消息。
 //
@@ -44,10 +48,44 @@ const GenericMessage = "服务暂时不可用，请稍后重试"
 // 想清楚「repository 把 ctx 超时包装成了 apperr.Internal」时你希望返回什么。
 // 这题没有唯一答案，但你要能说出你选的理由 —— review 时我会问。
 func HTTPStatus(err error) (status int, message string) {
-	panic("TODO(D12): 实现 HTTPStatus")
+	if err == nil {
+		return http.StatusOK, ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return StatusClientClosedRequest, "请求已取消"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "处理超时"
+	}
+	var e *Error
+	if ok := errors.As(err, &e); ok {
+		switch e.Kind {
+		case KindNotFound:
+			status = http.StatusNotFound
+		case KindInvalid:
+			status = http.StatusBadRequest
+		case KindConflict:
+			status = http.StatusConflict
+		case KindUnauthorized:
+			status = http.StatusUnauthorized
+		case KindForbidden:
+			status = http.StatusForbidden
+		case KindRateLimited:
+			status = http.StatusTooManyRequests
+		default:
+			status = http.StatusInternalServerError
+		}
+
+		if e.Message == "" {
+			message = GenericMessage
+		} else {
+			message = e.Message
+		}
+		return status, message
+	}
+
+	return http.StatusInternalServerError, GenericMessage
 }
 
 // StatusClientClosedRequest 是 nginx 定义的 499，标准库里没有。
 const StatusClientClosedRequest = 499
-
-var _ = http.StatusNotFound // 实现完可以删掉

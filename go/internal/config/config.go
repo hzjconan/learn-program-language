@@ -9,8 +9,14 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,14 +36,14 @@ type Secret string
 //
 // TODO(D12)：实现我 —— 返回 Redacted。
 func (s Secret) String() string {
-	panic("TODO(D12): 实现 Secret.String")
+	return Redacted
 }
 
 // LogValue 实现 slog.LogValuer，是 slog 的正规入口。
 //
 // TODO(D12)：实现我 —— 返回 slog.StringValue(Redacted)。
 func (s Secret) LogValue() slog.Value {
-	panic("TODO(D12): 实现 Secret.LogValue")
+	return slog.StringValue(Redacted)
 }
 
 // MarshalJSON 管住 encoding/json。
@@ -48,7 +54,7 @@ func (s Secret) LogValue() slog.Value {
 // 而 slog 的 JSON handler 在找不到 LogValuer 时会退回 json.Marshal ——
 // 所以少了这个方法，换个 Handler 就开始泄漏（D12 §2 的表）。
 func (s Secret) MarshalJSON() ([]byte, error) {
-	panic("TODO(D12): 实现 Secret.MarshalJSON")
+	return json.Marshal(Redacted)
 }
 
 // Reveal 返回真实值。⚠️ 只在真正要用的地方调用（比如拼请求头）。
@@ -104,7 +110,16 @@ const (
 //     脱敏就只能指望 Secret.MarshalJSON / String 兜着（D12 §2 的表）。
 //     少写一个方法就漏一条路，与其记住哪条路安全，不如都堵上。
 func (c Config) LogValue() slog.Value {
-	panic("TODO(D12): 实现 Config.LogValue")
+	return slog.GroupValue(
+		slog.String("addr", c.Addr),
+		slog.Duration("read_timeout", c.ReadTimeout),
+		slog.Duration("write_timeout", c.WriteTimeout),
+		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
+		slog.Int64("max_body_bytes", c.MaxBodyBytes),
+		slog.String("log_level", c.LogLevel.String()),
+		slog.String("log_format", c.LogFormat),
+		slog.String("api_token", c.APIToken.String()),
+	)
 }
 
 // Load 从 lookup 读取配置，缺失的项用默认值，最后校验。
@@ -133,7 +148,98 @@ func (c Config) LogValue() slog.Value {
 //     ⚠️ 但 API_TOKEN 解析失败时【不能】把值打出来
 //   - **返回前调用 Validate()**
 func Load(lookup Lookup) (Config, error) {
-	panic("TODO(D12): 实现 Load")
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+
+	var errs []error
+	c := Config{
+		Addr:            DefaultAddr,
+		ReadTimeout:     DefaultReadTimeout,
+		WriteTimeout:    DefaultWriteTimeout,
+		ShutdownTimeout: DefaultShutdownTimeout,
+		MaxBodyBytes:    DefaultMaxBodyBytes,
+		LogLevel:        slog.LevelInfo,
+		LogFormat:       DefaultLogFormat,
+	}
+
+	if v, ok := lookup("ADDR"); ok {
+		c.Addr = v
+	}
+
+	if v, ok := lookup("READ_TIMEOUT"); ok {
+		t, e := time.ParseDuration(v)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("READ_TIMEOUT %v 无效: %w", v, e))
+		} else {
+			c.ReadTimeout = t
+		}
+	}
+
+	if v, ok := lookup("WRITE_TIMEOUT"); ok {
+		t, e := time.ParseDuration(v)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("WRITE_TIMEOUT %v 无效: %w", v, e))
+		} else {
+			c.WriteTimeout = t
+		}
+	}
+
+	if v, ok := lookup("SHUTDOWN_TIMEOUT"); ok {
+		t, e := time.ParseDuration(v)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("SHUTDOWN_TIMEOUT %v 无效: %w", v, e))
+		} else {
+			c.ShutdownTimeout = t
+		}
+	}
+
+	if v, ok := lookup("MAX_BODY_BYTES"); ok {
+		t, e := strconv.ParseInt(v, 10, 64)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("MAX_BODY_BYTES %v 无效: %w", v, e))
+		} else {
+			c.MaxBodyBytes = t
+		}
+	}
+
+	if v, ok := lookup("LOG_LEVEL"); ok {
+		switch strings.ToLower(v) {
+		case "debug":
+			c.LogLevel = slog.LevelDebug
+		case "info":
+			c.LogLevel = slog.LevelInfo
+		case "warn":
+			c.LogLevel = slog.LevelWarn
+		case "error":
+			c.LogLevel = slog.LevelError
+		default:
+			errs = append(errs, fmt.Errorf("LOG_LEVEL=%q: 未知级别（debug/info/warn/error）", v))
+		}
+	}
+
+	if v, ok := lookup("LOG_FORMAT"); ok {
+		switch v {
+		case "text", "json":
+			c.LogFormat = v
+		default:
+			errs = append(errs, fmt.Errorf("LOG_FORMAT=%q: 未知格式（text/json）", v))
+		}
+	}
+
+	if v, ok := lookup("API_TOKEN"); ok {
+		c.APIToken = Secret(v)
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return Config{}, err
+	}
+
+	if err := c.Validate(); err != nil {
+		return Config{}, err
+	}
+
+	return c, nil
 }
 
 // Validate 检查配置是否自洽。
@@ -160,7 +266,32 @@ func Load(lookup Lookup) (Config, error) {
 // 有意思的是 "ReadTimeout 必须为正" 【不会】被挡 —— ST1005 对含内部大写的
 // 标识符（ReadTimeout、MaxBodyBytes）有豁免，而 Addr 看起来就是个普通单词。
 func (c Config) Validate() error {
-	panic("TODO(D12): 实现 Validate")
+	var errs []error
+
+	if c.Addr == "" {
+		errs = append(errs, errors.New("配置项 Addr 不能为空"))
+	}
+	if c.ReadTimeout <= 0 {
+		errs = append(errs, errors.New("配置项 ReadTimeout 必须为正"))
+	}
+	if c.WriteTimeout <= 0 {
+		errs = append(errs, errors.New("配置项 WriteTimeout 必须为正"))
+	}
+	if c.ShutdownTimeout <= 0 {
+		errs = append(errs, errors.New("配置项 ShutdownTimeout 必须为正"))
+	}
+	if c.MaxBodyBytes <= 0 {
+		errs = append(errs, errors.New("配置项 MaxBodyBytes 必须为正"))
+	}
+	if c.LogFormat != "text" && c.LogFormat != "json" {
+		errs = append(errs, fmt.Errorf("配置项 LogFormat=%q 必须是 text 或 json", c.LogFormat))
+	}
+	// D11 §8：WriteTimeout 从读到请求头就开始计时，比 ReadTimeout 短的话慢请求被掐断
+	if c.WriteTimeout <= c.ReadTimeout {
+		errs = append(errs, errors.New("配置项 WriteTimeout 必须大于 ReadTimeout"))
+	}
+
+	return errors.Join(errs...)
 }
 
 // NewLogger 按配置造一个 logger。
@@ -171,5 +302,12 @@ func (c Config) Validate() error {
 //   - Level 用 c.LogLevel
 //   - 写到传入的 w
 func NewLogger(c Config, w io.Writer) *slog.Logger {
-	panic("TODO(D12): 实现 NewLogger")
+	opts := &slog.HandlerOptions{Level: c.LogLevel}
+	var h slog.Handler
+	if c.LogFormat == "json" {
+		h = slog.NewJSONHandler(w, opts)
+	} else {
+		h = slog.NewTextHandler(w, opts)
+	}
+	return slog.New(h)
 }

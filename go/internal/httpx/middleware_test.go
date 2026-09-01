@@ -1,8 +1,11 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -256,24 +259,26 @@ func TestHTTPX_LoggingRecordsStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got LogEntry
-			h := Logging(func(e LogEntry) { got = e })(tt.handler)
+			var buf bytes.Buffer
+			logger := slog.New(WithRequestID(slog.NewJSONHandler(&buf, nil)))
+			h := Logging(logger)(tt.handler)
 			h.ServeHTTP(httptest.NewRecorder(), req("POST", "/some/path", ""))
 
-			if got.Status != tt.wantStatus {
-				t.Errorf("Status = %d, want %d", got.Status, tt.wantStatus)
+			lines := parseLines(t, &buf)
+			if lines[0]["status"] != float64(tt.wantStatus) {
+				t.Errorf("Status = %v, want %d", lines[0]["status"], tt.wantStatus)
 			}
-			if got.Bytes != tt.wantBytes {
-				t.Errorf("Bytes = %d, want %d", got.Bytes, tt.wantBytes)
+			if lines[0]["bytes"] != float64(tt.wantBytes) {
+				t.Errorf("Bytes = %v, want %d", lines[0]["bytes"], tt.wantBytes)
 			}
-			if got.Method != "POST" {
-				t.Errorf("Method = %q, want POST", got.Method)
+			if lines[0]["method"] != "POST" {
+				t.Errorf("Method = %v, want POST", lines[0]["method"])
 			}
-			if got.Path != "/some/path" {
-				t.Errorf("Path = %q, want /some/path", got.Path)
+			if lines[0]["path"] != "/some/path" {
+				t.Errorf("Path = %v, want /some/path", lines[0]["path"])
 			}
-			if got.Duration <= 0 {
-				t.Errorf("Duration = %v, 应该是正数", got.Duration)
+			if d, ok := lines[0]["duration_ms"].(float64); !ok || d <= 0 {
+				t.Errorf("Duration(ms) = %v, 应该是正数", lines[0]["duration_ms"])
 			}
 		})
 	}
@@ -281,28 +286,35 @@ func TestHTTPX_LoggingRecordsStatus(t *testing.T) {
 
 // TestHTTPX_LoggingPicksUpRequestID 验证 Logging 能拿到 RequestID 放进 ctx 的值。
 func TestHTTPX_LoggingPicksUpRequestID(t *testing.T) {
-	var got LogEntry
+	var buf bytes.Buffer
+	logger := slog.New(WithRequestID(slog.NewJSONHandler(&buf, nil)))
 	// ⭐ RequestID 必须在【外】层 —— 它用 r.WithContext 造了个新 request 传给内层，
 	// 反过来的话 Logging 手上还是老的 r，ctx 里没有 ID。
-	h := Chain(okHandler, RequestID, Logging(func(e LogEntry) { got = e }))
+	h := Chain(okHandler, RequestID, Logging(logger))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req("GET", "/", ""))
 
-	if got.RequestID == "" {
+	lines := parseLines(t, &buf)
+	id, present := lines[0]["request_id"]
+	if !present || id == "" {
 		t.Error("LogEntry.RequestID 是空的 —— RequestID 在外层，Logging 应该能从 ctx 拿到")
 	}
-	if got.RequestID != rec.Header().Get(RequestIDHeader) {
-		t.Errorf("日志里的 ID = %q，响应头里的 = %q，应该一致",
-			got.RequestID, rec.Header().Get(RequestIDHeader))
+	if id != rec.Header().Get(RequestIDHeader) {
+		t.Errorf("日志里的 ID = %v，响应头里的 = %v，应该一致",
+			id, rec.Header().Get(RequestIDHeader))
 	}
 }
 
 func TestHTTPX_LoggingNoRequestID(t *testing.T) {
-	var got LogEntry
-	h := Logging(func(e LogEntry) { got = e })(okHandler) // 没有 RequestID 中间件
+	var buf bytes.Buffer
+	logger := slog.New(WithRequestID(slog.NewJSONHandler(&buf, nil)))
+	h := Logging(logger)(okHandler) // 没有 RequestID 中间件
 	h.ServeHTTP(httptest.NewRecorder(), req("GET", "/", ""))
-	if got.RequestID != "" {
-		t.Errorf("没有 RequestID 中间件时应该留空，得到 %q", got.RequestID)
+
+	lines := parseLines(t, &buf)
+	id, present := lines[0]["request_id"]
+	if present && id != "" {
+		t.Errorf("没有 RequestID 中间件时应该留空，得到 %v", id)
 	}
 }
 
@@ -395,11 +407,35 @@ func TestHTTPX_RateLimitConcurrent(t *testing.T) {
 	}
 }
 
+// parseLines 把 slog 的 JSON 输出按行解析成 map，供断言使用。
+//
+// slog 的 JSONHandler 每条日志写一行（JSON Lines 格式），所以按 \n 切开
+// 再逐行 Unmarshal 就行。
+func parseLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper() // ⭐ 失败时报错指向【调用方】那一行，不是这里（D6）
+
+	var out []map[string]any
+	for _, ln := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if ln == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(ln), &m); err != nil {
+			// 日志不是合法 JSON 属于「测试前提坏了」，直接 Fatal
+			t.Fatalf("日志不是合法 JSON: %v\n%s", err, ln)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // ---------- 整链 ----------
 
 // TestHTTPX_FullChain 验证四个中间件串起来能正常工作。
 func TestHTTPX_FullChain(t *testing.T) {
-	var entries []LogEntry
+	var buf bytes.Buffer
+	logger := slog.New(WithRequestID(slog.NewJSONHandler(&buf, nil)))
+
 	var mu sync.Mutex
 	var panics int
 
@@ -417,7 +453,7 @@ func TestHTTPX_FullChain(t *testing.T) {
 			fmt.Fprint(w, "ok") //nolint:errcheck
 		}),
 		RequestID,
-		Logging(func(e LogEntry) { mu.Lock(); entries = append(entries, e); mu.Unlock() }),
+		Logging(logger),
 		Recover(func(r *http.Request, v any, s []byte) { mu.Lock(); panics++; mu.Unlock() }),
 		RateLimit(100, time.Hour),
 	)
@@ -426,19 +462,74 @@ func TestHTTPX_FullChain(t *testing.T) {
 		h.ServeHTTP(httptest.NewRecorder(), req("GET", p, ""))
 	}
 
-	if len(entries) != 3 {
-		t.Fatalf("记录了 %d 条日志, want 3", len(entries))
+	lines := parseLines(t, &buf)
+	if len(lines) != 3 {
+		t.Fatalf("记录了 %d 条日志, want 3", len(lines))
 	}
-	if entries[1].Status != 500 {
-		t.Errorf("panic 那次记录的状态码 = %d, want 500\n"+
-			"（Logging 在 Recover 外层，应该看到 Recover 写的 500）", entries[1].Status)
+	// ⚠️ JSON 数字是 float64（D12 §1.1）
+	if lines[1]["status"] != float64(500) {
+		t.Errorf("panic 那次记录的状态码 = %v, want 500\n"+
+			"（Logging 在 Recover 外层，应该看到 Recover 写的 500）", lines[1]["status"])
 	}
 	if panics != 1 {
 		t.Errorf("onPanic 被调用了 %d 次, want 1", panics)
 	}
-	for i, e := range entries {
-		if e.RequestID == "" {
+	for i, ln := range lines {
+		id, present := ln["request_id"]
+		if !present || id == "" {
 			t.Errorf("第 %d 条日志没有 request ID", i)
 		}
 	}
+}
+
+// TestHTTPX_WithRequestIDSurvivesWith 锁住 QA #18：
+// ctxHandler 必须重写 WithAttrs / WithGroup 并把结果【重新包一层】，
+// 否则一调 .With() 包装层就脱落，request_id 静默丢失。
+//
+// ⚠️ 这三个用例都会因为「删掉那两个方法」而失败 —— 这正是它们存在的理由。
+func TestHTTPX_WithRequestIDSurvivesWith(t *testing.T) {
+	newLogger := func(buf *bytes.Buffer) slog.Handler {
+		return WithRequestID(slog.NewJSONHandler(buf, nil))
+	}
+	ctx := context.WithValue(context.Background(), reqIDKey, "req-1")
+
+	t.Run("WithAttrs 之后仍在顶层", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := newLogger(&buf).WithAttrs([]slog.Attr{slog.String("component", "http")})
+		slog.New(h).InfoContext(ctx, "x")
+
+		ln := parseLines(t, &buf)[0]
+		if ln["request_id"] != "req-1" {
+			t.Errorf("request_id = %v, want req-1\n"+
+				"（ctxHandler.WithAttrs 没重写？包装层脱落了）", ln["request_id"])
+		}
+	})
+
+	t.Run("WithGroup 之后嵌在组里", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := newLogger(&buf).WithGroup("g")
+		slog.New(h).InfoContext(ctx, "x")
+
+		ln := parseLines(t, &buf)[0]
+		// ⚠️ WithGroup 之后，Handle 里 AddAttrs 加的属性也会进这个组
+		g, ok := ln["g"].(map[string]any)
+		if !ok {
+			t.Fatalf("没有 g 这个分组: %v", ln)
+		}
+		if g["request_id"] != "req-1" {
+			t.Errorf("g.request_id = %v, want req-1\n"+
+				"（ctxHandler.WithGroup 没重写？）", g["request_id"])
+		}
+	})
+
+	t.Run("Logger.With 也走这条路", func(t *testing.T) {
+		var buf bytes.Buffer
+		// ⭐ 这是真实用法：logger.With(...) 内部调的就是 handler.WithAttrs
+		slog.New(newLogger(&buf)).With("component", "http").InfoContext(ctx, "x")
+
+		ln := parseLines(t, &buf)[0]
+		if ln["request_id"] != "req-1" {
+			t.Errorf("request_id = %v, want req-1", ln["request_id"])
+		}
+	})
 }
