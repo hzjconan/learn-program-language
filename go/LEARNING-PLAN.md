@@ -154,6 +154,7 @@
 - **`log/slog`**：结构化日志、Handler、上下文属性（1.21 后的标准答案，别再用第三方了）
 - 分层错误设计：domain error → HTTP status 的映射
 - **练习**：给 D11 的服务加上配置、slog、统一错误响应
+- 📖 讲解：[`lessons/D12.md`](lessons/D12.md) · 💻 练习：`internal/apperr/` + `internal/config/` · 🔬 `go run ./cmd/jsondemo`
 
 ### D13 · 数据库
 - `database/sql` 接口模型、连接池参数（`SetMaxOpenConns` 等）

@@ -112,8 +112,19 @@ func EventsHandler(s *Store) http.HandlerFunc {
 	// 定期发一行注释（SSE 里以 : 开头的行会被客户端忽略）来保活。
 	const heartbeat = 15 * time.Second
 
-	// 每次写之前把 deadline 推到这么远。它必须【大于】heartbeat，
-	// 否则心跳还没来得及发，连接就被 WriteTimeout 砍了。
+	// 每次写之前把 deadline 推到这么远。
+	//
+	// ⭐ writeWindow 限的是【单次写最多能阻塞多久】，不是「连接能活多久」，
+	// 也不是「两次写之间能隔多久」。写完之后连接空闲多长时间都没关系 ——
+	// deadline 到期时如果没有正在进行的写操作，它不会关闭连接，什么都不做。
+	//
+	// 所以 writeWindow 和 heartbeat 谁大谁小【无所谓】，只要每次写之前
+	// 都重设（writeAndFlush 就是干这个的）。实测 window=50ms、间隔 400ms
+	// 连写 5 次全部成功。
+	//
+	// ⚠️ 但过期状态是【粘住】的：deadline 过期后不重设就直接写，会立刻
+	// 拿到 i/o timeout（实测 122µs 就返回了，根本没阻塞）。
+	// 换句话说 —— 漏掉一次 SetWriteDeadline，这条连接就废了。
 	const writeWindow = 30 * time.Second
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +186,10 @@ func EventsHandler(s *Store) http.HandlerFunc {
 //
 //	http.Server.WriteTimeout 是从【读完请求头】开始算的，不是从「开始写响应」算。
 //	所以一个设了 WriteTimeout: 15s 的服务，任何 SSE 连接都会在 15 秒后被砍断 ——
-//	不管你推得多勤快。
+//	写得再勤快也没用，因为那是个【绝对时刻】，不会因为你又写了一次就自动顺延。
+//
+//	唯一的解法就是主动调 SetWriteDeadline 把它覆盖掉（QA #17：两者是同一个
+//	deadline，后写的覆盖先写的，能放宽也能收紧）。
 //
 // 实测（全局 WriteTimeout = 200ms）：
 //

@@ -2032,8 +2032,21 @@ for {
   调用方拿到什么就能取消什么，不用额外记 id
 - **取消函数用 `sync.Once` 保证幂等** —— 调用方很可能 defer 一次、出错路径再调一次，
   重复 `close` 会 panic（D8 §3）
-- **心跳（`: ping`）** —— 反向代理会掐掉空闲太久的连接；
-  `writeWindow` 必须**大于** `heartbeat`，否则心跳还没发连接就被砍了
+- **心跳（`: ping`）** —— 反向代理会掐掉空闲太久的连接，所以定期发一行注释保活
+
+> ⚠️ **更正**（后来实测推翻的说法）：我原先在这里和 `events.go` 里写过
+> 「`writeWindow` 必须**大于** `heartbeat`，否则心跳还没发连接就被砍了」——
+> **这是错的**。
+>
+> `SetWriteDeadline` 限的是**单次写最多能阻塞多久**，不是连接寿命，也不是
+> 两次写之间的间隔。deadline 到期时如果没有正在进行的写操作，它**什么都不做**，
+> 不会关闭连接。所以只要每次写之前都重设，两者谁大谁小都无所谓。
+>
+> 实测：`window=50ms`、写间隔 `400ms`（是窗口的 8 倍），连写 5 次全部成功。
+>
+> 真正要命的是另一条：**过期状态是「粘住」的**。deadline 过期后如果不重设就
+> 直接写，会立刻拿到 `i/o timeout`（实测 122µs 返回，根本没阻塞过），连接当场作废。
+> 所以规则不是「窗口要够大」，而是「**每次写之前都必须重设**」。
 - **`SetWriteDeadline` 可能返回 `ErrNotSupported`** —— `httptest.ResponseRecorder`
   就不支持。这不是致命错误，继续写就行，只是失去了「单独放宽超时」的能力
 
@@ -2050,3 +2063,147 @@ w.Write([]byte({"key":"+ key +","value":"+ value +"}))
 json.NewEncoder(responseWriter).Encode(value)
 ```
 - 没搞懂：
+
+---
+
+## D12 · JSON、配置、结构化日志、错误分层
+
+### 我的笔记
+
+- 反直觉：
+- 踩的坑：
+- 没搞懂：
+
+---
+
+### 小题 A · 推理题（先想，别跑代码）
+
+> 规则同前：先写下你的答案和**理由**，再跑代码验证，最后把「对了/错在哪」补进来。
+> 答错的会进 `MISTAKES.md`，最终面试题会重测。
+
+**A1.** 下面这段，`out` 打印出来是什么？为什么？
+
+```go
+const id int64 = 9007199254740993
+b, _ := json.Marshal(map[string]int64{"id": id})
+var m map[string]any
+json.Unmarshal(b, &m)
+out := fmt.Sprintf("%v %T", m["id"], m["id"])
+```
+
+**A2.** 这两次 `Unmarshal` 之后，`c1` 和 `c2` 有区别吗？如果没有，说明这个设计有什么问题；
+如果要区分，怎么改？
+
+```go
+type C struct{ Port int `json:"port"` }
+var c1, c2 C
+json.Unmarshal([]byte(`{"port":0}`), &c1)
+json.Unmarshal([]byte(`{}`), &c2)
+```
+
+**A3.** `json.Marshal(S{})` 输出什么？
+
+```go
+type Inner struct{ X int }
+type S struct {
+	A []int  `json:"a,omitempty"`
+	B Inner  `json:"b,omitempty"`
+}
+```
+
+**A4.** 下面三行，哪几行会把 token 明文打出来？
+
+```go
+type Secret string
+func (s Secret) String() string { return "[REDACTED]" }
+
+s := Secret("abc123")
+fmt.Printf("%v\n", s)            // ①
+fmt.Printf("%#v\n", s)           // ②
+b, _ := json.Marshal(s)          // ③
+```
+
+**A5.** 这段 slog 输出里有没有 `trace_id`？为什么？
+
+```go
+type h struct{ slog.Handler }
+func (x h) Handle(ctx context.Context, r slog.Record) error {
+	if id, ok := ctx.Value(k{}).(string); ok {
+		r.AddAttrs(slog.String("trace_id", id))
+	}
+	return x.Handler.Handle(ctx, r)
+}
+
+l := slog.New(h{slog.NewJSONHandler(os.Stdout, nil)})
+ctx := context.WithValue(context.Background(), k{}, "t-1")
+l.Info("hello")                  // ①
+l.InfoContext(ctx, "hello")      // ②
+```
+
+**A6.** `KindOf` 如果这样实现，什么情况下会出错？
+
+```go
+func KindOf(err error) (Kind, bool) {
+	if e, ok := err.(*Error); ok {
+		return e.Kind, true
+	}
+	return KindInternal, false
+}
+```
+
+**A7.** 下面 handler 返回给客户端的消息是什么？这有什么问题？
+
+```go
+err := apperr.Internal("查询失败", errors.New("dial tcp 10.0.0.5:5432: connection refused"))
+status, msg := HTTPStatus(err)   // 假设 HTTPStatus 里写的是 return statusOf(e.Kind), e.Error()
+```
+
+**A8.** `Kind` 的常量顺序为什么把 `KindInternal` 放在第一个（也就是让它当零值）？
+如果改成 `KindNotFound` 第一个，会出什么事？
+
+#### 我的答案
+
+（写在这里）
+
+#### 实际跑完的验证结果（对了/错在哪）
+
+（跑完补这里）
+
+---
+
+### 小题 B · 设计题（可以查文档，要写理由）
+
+**B1.** 你的服务要返回一个订单列表，订单号是雪花 ID（`int64`，19 位）。
+前端是 TypeScript。你会怎么设计这个字段？为什么？给出 Go 结构体和示例 JSON。
+
+**B2.** `HTTPStatus` 里，`context.Canceled` / `DeadlineExceeded` 的判断应该排在
+「链上找 `*Error`」的**前面**还是**后面**？
+
+考虑这个场景：repository 拿到 ctx 超时，把它包装成了 `apperr.Internal("查库失败", ctx.Err())`。
+两种顺序下客户端分别收到什么？你选哪个，为什么？
+
+**B3.** 你要给 `Logging` 中间件换成 slog，并且让**每条**业务日志都自动带上 request ID。
+有两种做法：
+
+- (a) 中间件把 `logger.With("request_id", id)` 放进 ctx，业务代码从 ctx 里取 logger
+- (b) 自定义 `slog.Handler`，从 ctx 里提取 request ID（讲义 §3 那种）
+
+各自的优缺点是什么？你选哪个？
+（提示：想想「业务代码忘了从 ctx 取 logger」和「业务代码忘了用 `InfoContext`」这两种失误分别会怎样）
+
+**B4.** 十二要素说「配置放环境变量」。但你的服务有一份 200 行的路由规则配置，
+显然不适合塞进环境变量。你会怎么处理？环境变量和配置文件的分工是什么？
+
+**B5.** `Validate()` 里我要求校验 `WriteTimeout > ReadTimeout`。
+结合 D11 §8 讲的四个超时，说明为什么这个约束是必要的，
+以及如果配反了（`WriteTimeout` 更短），线上会观察到什么现象。
+
+#### 我的答案
+
+（写在这里）
+
+---
+
+### Claude 的批改
+
+（review 后补）

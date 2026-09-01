@@ -24,6 +24,8 @@
 | [13](#13-一个-nil-指针装进-error-接口后为什么就不是-nil-了) | 一个 nil 指针，装进 `error` 接口后为什么就不是 nil 了 | 接口 |
 | [14](#14-跑-benchmark-时为什么要加--run-参数) | 跑 benchmark 时为什么要加 `-run` 参数 | 测试 |
 | [15](#15-无缓冲-channel-什么时候会死锁) | 无缓冲 channel 什么时候会死锁 | 并发 |
+| [16](#16-setwritedeadline两次写之间隔很久会不会超时) | `SetWriteDeadline`：两次写之间隔很久，会不会超时 | 网络 |
+| [17](#17-writetimeout-和-setwritedeadline-同时存在时谁说了算) | `WriteTimeout` 和 `SetWriteDeadline` 同时存在时谁说了算 | 网络 |
 
 ---
 
@@ -927,3 +929,105 @@ fatal error: all goroutines are asleep - deadlock!
 只要还有**一条** goroutine 在跑（HTTP server 的 accept 循环、后台定时器、一个空转的循环），**这个环就静默地卡在那儿**，运行时不会报任何东西。
 
 真实服务里的表现是：**某个请求永远不返回** + **goroutine 数只增不减**。那时候要靠 `/debug/pprof/goroutine` 看栈（D16）——栈上的 `[chan send]` / `[chan receive]` 标记会直接告诉你这条 goroutine 卡在等什么、卡在哪一行。
+
+
+---
+
+## 16. `SetWriteDeadline`：两次写之间隔很久，会不会超时
+
+**一句话**：不会。写 deadline 限的是**单次写操作最多能阻塞多久**，不是「连接能活多久」，也不是「两次写之间能隔多久」。deadline 到期时如果没有正在进行的写操作，它**什么都不做**——不报错，也不关连接。
+
+背景：D11 的 SSE 示例 `events.go` 里，每次写之前都调一遍 `rc.SetWriteDeadline(time.Now().Add(window))`。疑问是——这次写完，到下次有数据可写之间过了很久，deadline 早过期了，会怎样？
+
+### 实测（`window=200ms`，两次写之间空闲 `1s`，是窗口的 5 倍）
+
+| handler 的写法 | 客户端收到 | handler 里的错误 |
+|---|---|---|
+| ① 每次写前都重设（`events.go` 的做法） | `[first second]` | `<nil>` |
+| ② 只在开头设一次，之后不重设 | `[first]` | `write tcp ...: i/o timeout` |
+| ③ 重设成**零值**（清除超时） | `[first second]` | `<nil>` |
+
+再压一档：`window=50ms`、写间隔 `400ms`（窗口的 8 倍），连写 5 次全部成功。
+
+### ⚠️ 真正的坑：过期状态是「粘住」的
+
+情况 ② 失败得很有意思。量一下那次写的耗时：
+
+```
+第二次写耗时 = 121.875µs，错误 = write tcp ...: i/o timeout
+```
+
+**122 微秒**——它根本没阻塞过，是**立刻**失败的。deadline 过期后 fd 被标记成「已超时」，这个状态**一直粘着**，直到下一次 `SetWriteDeadline` 把它清掉。
+
+所以规则不是「窗口要设得够大」，而是：
+
+> ⭐ **漏掉任何一次 `SetWriteDeadline`，这条连接就当场作废。**
+
+这也是为什么 `events.go` 把「设 deadline + 写 + flush」绑成一个 `writeAndFlush` 函数——让你没机会漏。
+
+### 由此更正了一条早先的说法
+
+`events.go` 和 D11 笔记里原先写着：
+
+> ~~`writeWindow` 必须**大于** `heartbeat`，否则心跳还没来得及发，连接就被砍了~~
+
+**这是错的**，上面 `window=50ms / 间隔 400ms` 的测试直接推翻了它。两者谁大谁小无所谓，因为每次写之前都重设了。当时是把**写超时**当成了**空闲超时**——管空闲的是 `http.Server.IdleTimeout`，是另一个东西。
+
+### 那零值（永不超时）行不行
+
+语法上行（情况 ③），但 SSE 里**不要用**：零值意味着一个卡死的客户端能让这条 goroutine 和连接**永远**挂着。给一个大但有限的窗口（`events.go` 里是 30s），配合心跳，才是对的。
+
+---
+
+## 17. `WriteTimeout` 和 `SetWriteDeadline` 同时存在时谁说了算
+
+**一句话**：`SetWriteDeadline` **取代** `WriteTimeout`。它们不是两套机制，是同一个东西——一条连接上只有**一个**写 deadline，谁最后调谁说了算。不取较小值，也不叠加。
+
+### 实测（`http.Server.WriteTimeout = 300ms`）
+
+| handler 里做的事 | 结果 |
+|---|---|
+| ① 什么都不做，慢 600ms | ⚠️ `i/o timeout` |
+| ② `SetWriteDeadline(+2s)`，慢 600ms | ✅ 成功 —— **放宽生效** |
+| ③ `SetWriteDeadline(+100ms)`，慢 200ms | ⚠️ `i/o timeout` —— **收紧也生效** |
+| ④ `SetWriteDeadline(零值)`，慢 600ms | ✅ 成功 —— **彻底关掉** |
+
+③ 最能说明问题：服务器配的是 300ms，我在 handler 里设成 100ms，200ms 就被砍了——**比服务器配置更严**。
+
+### 机制：`WriteTimeout` 只是替你调了同一个方法
+
+`net/http/server.go` 的 `readRequest` 里：
+
+```go
+if d := c.server.WriteTimeout; d > 0 {
+	defer func() {
+		c.rwc.SetWriteDeadline(time.Now().Add(d))   // ← 就是同一个方法
+	}()
+}
+```
+
+`http.ResponseController.SetWriteDeadline` 最终也是调 `c.rwc.SetWriteDeadline`。所以「后写的覆盖先写的」。
+
+⚠️ 注意那个 `defer`：deadline 是在**请求头读完之后**才装上的，起点**不是**连接建立时——这就是 D11 §8 那个坑：`WriteTimeout` 实际覆盖的是「读完请求头 → 响应写完」一整段，**包含你 handler 里的业务耗时**。
+
+### 覆盖只在**当前请求**内有效
+
+keep-alive 复用同一条连接的实测：
+
+```
+请求 1  conn=127.0.0.1:62284  放宽到 +5s     ✅ 写成功
+请求 2  conn=127.0.0.1:62284  没做任何设置    ⚠️ 写失败 (i/o timeout)
+→ 两个请求确实走的同一条 TCP 连接
+```
+
+因为上面那段代码在 `readRequest` 里，**每读一个新请求就重新装一次**。第 1 个请求把 deadline 推到 +5s，第 2 个请求一进来就被重置回 `now+300ms`。
+
+所以不用担心「某个 SSE handler 放宽了 deadline，会把后面复用这条连接的普通请求也带松」——不会。
+
+### 实践结论
+
+> ⭐ `WriteTimeout` 设成对**普通接口**合理的值（比如 10s），长连接接口（SSE、下载）在自己的 handler 里用 `SetWriteDeadline` **局部豁免**。
+>
+> 不要为了迁就一个 SSE 接口，把全局 `WriteTimeout` 调大或干脆设成 0 ——那等于所有接口都失去保护。
+
+（相关：[#16](#16-setwritedeadline两次写之间隔很久会不会超时)、D11 §8 四个超时）
