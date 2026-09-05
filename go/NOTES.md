@@ -2430,3 +2430,183 @@ linters-settings:
 
 ⚠️ 最难查的是：**服务端日志里可能记的是 200**。
 `Logging` 记的是 `responseRecorder` 看到的状态码，而写失败发生在更下层。
+
+---
+
+## D13 · 数据库
+
+### 我的笔记
+
+- 反直觉：
+- 踩的坑：
+- 没搞懂：
+
+---
+
+### 小题 A · 推理题（先想，别跑代码）
+
+**A1.** 这段代码有没有问题？如果有，什么时候会暴露？
+
+```go
+db, err := sql.Open("pgx", os.Getenv("DB_DSN"))
+if err != nil {
+	log.Fatal(err)
+}
+log.Println("数据库连接成功")
+```
+
+**A2.** 下面两段，哪段会泄漏连接？为什么？
+
+```go
+// ①
+rows, _ := db.QueryContext(ctx, `SELECT id FROM orders`)
+for rows.Next() {
+	var id int64
+	rows.Scan(&id)
+}
+
+// ②
+rows, _ := db.QueryContext(ctx, `SELECT id FROM orders`)
+for rows.Next() {
+	var id int64
+	if err := rows.Scan(&id); err != nil {
+		return err
+	}
+}
+```
+
+**A3.** 这个循环读完之后 `out` 里有 100 条数据，函数返回 `nil` 错误。
+能确定数据库里就是 100 条吗？为什么？
+
+```go
+for rows.Next() {
+	var o Order
+	rows.Scan(&o.ID)
+	out = append(out, o)
+}
+return out, nil
+```
+
+**A4.** `orders` 表里没有 id=999 这一行。下面这段会发生什么？
+
+```go
+res, err := db.ExecContext(ctx, `UPDATE orders SET status='paid' WHERE id=999`)
+if err != nil {
+	return err
+}
+return nil
+```
+
+**A5.** 这段事务代码有什么问题？（有两处）
+
+```go
+func (r *Repo) Create(ctx context.Context, o *Order) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := tx.QueryRowContext(ctx, insertOrder, o.Customer).Scan(&o.ID); err != nil {
+		return err
+	}
+	if _, err := r.db.ExecContext(ctx, insertItem, o.ID, "A-1"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+```
+
+**A6.** `note` 列可以为 NULL。下面这行会怎样？
+
+```go
+var note string
+err := db.QueryRowContext(ctx, `SELECT note FROM orders WHERE id=$1`, id).Scan(&note)
+```
+
+**A7.** 服务突然「整个挂住」——所有接口都不返回，CPU 很低，
+数据库也不忙，日志里没有任何错误。你会先看什么？为什么日志里什么都没有？
+
+**A8.** 下面这段为什么是错的？把它改对。
+
+```go
+q := "SELECT id FROM orders WHERE customer = '" + customer + "'"
+rows, err := db.QueryContext(ctx, q)
+```
+
+#### 我的答案
+A1: sql.Open只有在第二个参数“dsn”本身格式不合法时才会报错，格式合法但并不是一个有效地址时（或者因为网络原因不可访问）都不会报错，只有到第一次和数据库产生网络连接时才会报错。
+
+A2：第二个会泄漏。第一个会自然全读完或者读到一半出错，会自动关。第二个是自己半途中return，被rows占用的连接不会被释放。
+
+A3：不一定，有可能另一个事务对数据做了改动（增加或删除），但是在当前“查询”的这个事务中不可见。
+
+A4：数据库里0行被更改，并不会返回error，这段代码最终返回了nil的error，有可能误导调用方以为已经更新成功了，要用RowsAffected方法确认被修改的行数。
+
+A5：
+错误1:“defer tx.Rollback()”里面没有处理正常执行完，commit后再"rollback"会产生的sql.ErrTxDone，这是正常的，要忽略
+错误2:“QueryRowContext”这一行没有检查没有匹配查询结果时，返回的sql.ErrNoRows,这是正常的，要忽略。
+
+A6: 把数据库里的null转成go里的string会出错，这里可以用**COALESCE(note, '')**做保护，变成空字符串。
+
+A7：看代码里有没有可能造成数据库连接泄漏/没释放的问题。这个问题产生的时候，代码在死等一个可用的连接，并没有出错，所以日志里啥也没有。
+
+A8：这里用了字符串拼接的方式去造sql，可能带来sql注入的安全问题。正确写法是：
+```go
+q := "SELECT id FROM orders WHERE customer = $1"
+rows, err := db.QueryContext(ctx, q, customerId)
+```
+
+#### 实际跑完的验证结果（对了/错在哪）
+
+（跑完补这里）
+
+---
+
+### 小题 B · 设计题（可以查文档，要写理由）
+
+**B1.** `MaxOpenConns` 该设多少？你的服务要部署 6 个实例，
+Postgres 的 `max_connections` 是 100。给出你的数字和推导过程。
+另外说明 `MaxIdleConns` 为什么不该用默认值。
+
+**B2.** `Get` 里 `note` 列可以为 NULL。讲义 §6 给了四种接法
+（`sql.NullString` / `*string` / `COALESCE` / 扫进 `string`）。
+你选了哪个？如果产品后来说「要区分『没填备注』和『填了空白』」，你会怎么改？
+
+**B3.** 你的 `List` 有 `DefaultLimit` 和 `MaxLimit`。
+为什么列表接口**必须**有上限？如果客户端需要拿到全部数据，正确的做法是什么？
+（提示：想想 offset 分页在大表上的问题）
+
+**B4.** 讲义 §9 说「先手写 SQL，生产上用 sqlc，慎用 GORM」。
+如果你的团队里有人主张「用 GORM，开发快」，你会怎么回应？
+列出你认为**最有说服力的两条**理由，以及你愿意接受 GORM 的**一种场景**。
+
+**B5.** 现在 `Create` 是「一个订单一个事务」。
+如果要支持「批量导入 1000 个订单」，你会怎么设计？
+考虑：一个大事务 vs 1000 个小事务 vs 分批，各自的代价是什么？
+
+#### 我的答案
+
+B1:
+`MaxOpenConns`会设置在13左右，根据以下经验公式推导：
+实例数 × MaxOpenConns ≤ 数据库的 max_connections × 0.8。
+`MaxIdleConns`一般设置为和MaxOpenConns一样，默认是2，那就意味着有11个连接会被频繁关闭/打开，不利于性能。
+
+B2:
+我选择了用`COALESCE`的方案，因为最简单。如果要区分『没填备注』和『填了空白』，需要把struct里的note字段改成string的指针 - 有备注的时候就是备注的值或者空白字符串（填了空白），没有的时候是nil。
+
+B3：
+设`DefaultLimit	`是为了方便客户端调用，有时候可以偷懒不传这个参数，只要能满足业务逻辑，或者防止传入不正确的数字，比如负数。
+设`MaxLimit`是为了保护，防止客户端传入过大的值。如果客户端需要拿到全部数据，应该提供分页查询的机制。
+
+B4：
+用ORM框架比如GORM主要的问题首先是生成的 SQL 不可预测，其次性能问题难查。在一些sql并不复杂的应用里用GORM会方便开发，这种情况下可以考虑。
+
+B5：
+如果需要「批量导入 1000 个订单」，也应该最成一个订单一个事务，失败的那些订单可以做日志，之后重试或者修正数据（如果是数据问题的话）。“一个大事务”是不可取的，它有可能会占用超预期的锁表时间，导致其他操作无法进行。“分批的事务”也是一个可选方案，相比较于“一个订单一个事务”，它减少了事务提交的次数和把连接放回池子和重新拿出来的次数。
+
+---
+
+### Claude 的批改
+
+（review 后补）

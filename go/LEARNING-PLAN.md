@@ -163,6 +163,7 @@
 - 查询层方案对比：手写 SQL vs `sqlc`（代码生成，我推荐）vs `GORM`（ORM，Java 背景容易过度依赖，会讲清代价）
 - 数据库迁移工具
 - **练习**：给服务接上真实的 Postgres（Docker 起），实现 repository 层 + 事务
+- 📖 讲解：[`lessons/D13.md`](lessons/D13.md) · 💻 练习：`internal/orders/` · 🔬 `make db-migrate && go run ./cmd/dbdemo`
 
 ### D14 · 周综合项目
 - **项目**：一个完整的 REST API 服务 —— 分层架构（handler / service / repository）、依赖注入（构造函数注入，不需要 Spring）、完整测试、Docker 化
@@ -201,10 +202,48 @@
 
 ### D19 · 云原生基础
 - 为什么 K8s 生态全是 Go：读懂它们的代码风格
+- **Helm**（见下方专项说明）
 - `client-go`：clientset、informer、lister、workqueue 概念模型
 - CRD / controller / reconcile loop 的思想（**声明式 + 最终一致**，这是核心心智模型）
 - 阅读实战：带你读一段真实的 K8s controller 源码
 - **练习**：用 client-go 写一个集群资源巡检 CLI
+
+> #### 📌 Helm 专项（用户明确要求，D19 讲）
+>
+> **背景**：用户之前用过 Helm，但一直是「复制粘贴现成 chart 再改」，
+> 没有系统学过语法，看到 `{{- if .Values.x }}` 这类东西心里没底。
+>
+> **定位**：⚠️ **只讲基础概念 + 语法 + 常见场景，不要展开成完整的 Helm 教程。**
+> 目标是「以后能看懂任何 chart、能自己从零写一个、知道出问题去哪查」，
+> 不是「精通 Helm」。预计占 D19 的三分之一。
+>
+> 要覆盖的：
+>
+> 1. **它解决什么问题** —— 和裸 `kubectl apply` / `kustomize` 的对比；
+>    为什么需要模板（多环境、多副本、镜像 tag 要变）
+> 2. **Chart 结构** —— `Chart.yaml` / `values.yaml` / `templates/` / `_helpers.tpl` 各是什么
+> 3. **模板语法**（重点，这是他真正缺的那块）
+>    - 内置对象：`.Values` / `.Release` / `.Chart` / `.Capabilities`
+>    - 控制结构：`if` / `range` / `with`（讲清 `with` 会改变 `.` 的指向 —— 最常见的困惑源）
+>    - 管道和常用函数：`default` / `quote` / `toYaml` / `nindent` / `required`
+>    - ⭐ **空白控制 `{{-` `-}}`** —— 复制粘贴党最看不懂的就是这个，
+>      而且它直接决定生成的 YAML 合不合法
+>    - `define` + `include` vs `template`（为什么几乎总是用 `include`：它能接管道做 `indent`）
+> 4. **values 的覆盖顺序** —— `values.yaml` < `-f custom.yaml` < `--set`
+> 5. **常见场景**（每个给一个最小可用例子）
+>    - 多环境（dev/staging/prod 三份 values）
+>    - ConfigMap / Secret 的注入
+>    - 镜像 tag 从 CI 传进来
+>    - ⭐ **Hook：`pre-upgrade` 跑数据库迁移** —— 正好接 D13 §9.2 那条
+>      「迁移要作为独立的部署前步骤」，把两天串起来
+>    - 依赖（subchart）的基本概念，点到为止
+> 6. **调试手段**（这条最实用）
+>    - `helm template` —— 只渲染不安装，看生成的 YAML 到底长什么样
+>    - `--dry-run --debug`、`helm lint`、`helm diff` 插件
+>    - ⭐ 教学方式：**先让他改一个 chart 然后 `helm template` 看输出**，
+>      比讲语法有效得多
+>
+> **不讲**：library chart、OCI registry 的细节、chart 签名、复杂的 chart 测试框架。
 
 ### D20 · 写一个 Operator
 - `kubebuilder` 脚手架、CRD 定义、reconciler 实现
@@ -264,7 +303,7 @@
 - [x] D10 context 与并发模式 —— `internal/pipeline` 可取消的三阶段流水线（Source/Stage/Merge/Run）· 覆盖率 100% · 变异测试 8/9 · `-race -count=10` 无泄漏 · `cmd/ctxdemo` 七段演示
 - [x] D11 net/http 服务端 —— `internal/httpx` 手写四个中间件（RequestID/Recover/Logging/RateLimit）+ KV API + SSE 示例 · 变异测试 9/10 · `-race` 干净 · `cmd/httpdemo` 七段演示
 - [x] D12 JSON/配置/slog —— `internal/apperr` 错误分层（Kind→HTTP 映射）+ `internal/config` 环境变量加载与脱敏 · `httpx` 改造成 slog（ctxHandler 自动注入 request ID）· 变异测试 apperr 17/17 · httpx 8/8 · `cmd/jsondemo` 七个 JSON 坑 + 六段 slog
-- [ ] D13 数据库
+- [x] D13 数据库 —— `internal/orders` repository（事务 / rows 生命周期 / NULL / 错误翻译）· Postgres 17 via docker compose · 变异测试 7/9 · 覆盖率 87.8% · `cmd/dbdemo` 九段演示
 - [ ] D14 周综合项目：REST API 服务
 - [ ] D15 测试进阶
 - [ ] D16 可观测性

@@ -1,0 +1,21 @@
+# D13 的开发数据库。
+#
+#   cd go && docker compose -f deploy/docker-compose.yml up -d
+#   cd go && docker compose -f deploy/docker-compose.yml down -v    # -v 连数据一起删
+#
+# 端口用 5433 而不是 5432，避开本机可能已有的 Postgres。
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: golearn-pg
+    environment:
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: golearn
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devuser -d golearn"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
