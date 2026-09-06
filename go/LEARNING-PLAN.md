@@ -168,6 +168,7 @@
 ### D14 · 周综合项目
 - **项目**：一个完整的 REST API 服务 —— 分层架构（handler / service / repository）、依赖注入（构造函数注入，不需要 Spring）、完整测试、Docker 化
 - 我做完整 code review：架构分层、错误处理、并发安全、可测试性
+- 📖 讲解：[`lessons/D14.md`](lessons/D14.md) · 💻 练习：`internal/ordersvc/` + `internal/api/` + `cmd/api/` · 🐳 `Dockerfile`
 
 ---
 
@@ -304,7 +305,7 @@
 - [x] D11 net/http 服务端 —— `internal/httpx` 手写四个中间件（RequestID/Recover/Logging/RateLimit）+ KV API + SSE 示例 · 变异测试 9/10 · `-race` 干净 · `cmd/httpdemo` 七段演示
 - [x] D12 JSON/配置/slog —— `internal/apperr` 错误分层（Kind→HTTP 映射）+ `internal/config` 环境变量加载与脱敏 · `httpx` 改造成 slog（ctxHandler 自动注入 request ID）· 变异测试 apperr 17/17 · httpx 8/8 · `cmd/jsondemo` 七个 JSON 坑 + 六段 slog
 - [x] D13 数据库 —— `internal/orders` repository（事务 / rows 生命周期 / NULL / 错误翻译）· Postgres 17 via docker compose · 变异测试 7/9 · 覆盖率 87.8% · `cmd/dbdemo` 九段演示
-- [ ] D14 周综合项目：REST API 服务
+- [x] D14 周综合项目：REST API 服务 —— handler/service/repository 三层 + 构造函数注入（接口定义在消费方）· `ordersvc` 100% · `api` 91.3% · 端到端跑通 · Docker 镜像 12.2MB
 - [ ] D15 测试进阶
 - [ ] D16 可观测性
 - [ ] D17 性能与内存

@@ -80,6 +80,12 @@ type Config struct {
 	LogFormat string
 	// APIToken 是访问 API 需要的 token。空表示不鉴权。
 	APIToken Secret
+	// DatabaseURL 是 PostgreSQL 连接串（含密码，所以是 Secret）。
+	DatabaseURL Secret
+	// IdleTimeout 是 HTTP keep-alive 空闲超时（D11 §8 的第四个）。
+	IdleTimeout time.Duration
+	// RateLimit 是令牌桶容量（每分钟允许的请求数）。
+	RateLimit int
 }
 
 // 默认值。⭐ 没有任何环境变量时，Load 返回的就是这一份，且它必须能跑。
@@ -90,6 +96,8 @@ const (
 	DefaultShutdownTimeout = 15 * time.Second
 	DefaultMaxBodyBytes    = 1 << 20 // 1MB
 	DefaultLogFormat       = "text"
+	DefaultIdleTimeout     = 60 * time.Second
+	DefaultRateLimit       = 600 // 每分钟 600 次
 )
 
 // LogValue 实现 slog.LogValuer，控制整个 Config 记进日志时的样子。
@@ -115,10 +123,13 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("read_timeout", c.ReadTimeout),
 		slog.Duration("write_timeout", c.WriteTimeout),
 		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
+		slog.Duration("idle_timeout", c.IdleTimeout),
 		slog.Int64("max_body_bytes", c.MaxBodyBytes),
+		slog.Int("rate_limit", c.RateLimit),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 		slog.String("api_token", c.APIToken.String()),
+		slog.String("database_url", c.DatabaseURL.String()),
 	)
 }
 
@@ -158,7 +169,9 @@ func Load(lookup Lookup) (Config, error) {
 		ReadTimeout:     DefaultReadTimeout,
 		WriteTimeout:    DefaultWriteTimeout,
 		ShutdownTimeout: DefaultShutdownTimeout,
+		IdleTimeout:     DefaultIdleTimeout,
 		MaxBodyBytes:    DefaultMaxBodyBytes,
+		RateLimit:       DefaultRateLimit,
 		LogLevel:        slog.LevelInfo,
 		LogFormat:       DefaultLogFormat,
 	}
@@ -191,6 +204,15 @@ func Load(lookup Lookup) (Config, error) {
 			errs = append(errs, fmt.Errorf("SHUTDOWN_TIMEOUT %v 无效: %w", v, e))
 		} else {
 			c.ShutdownTimeout = t
+		}
+	}
+
+	if v, ok := lookup("IDLE_TIMEOUT"); ok {
+		t, e := time.ParseDuration(v)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("IDLE_TIMEOUT %v 无效: %w", v, e))
+		} else {
+			c.IdleTimeout = t
 		}
 	}
 
@@ -229,6 +251,19 @@ func Load(lookup Lookup) (Config, error) {
 
 	if v, ok := lookup("API_TOKEN"); ok {
 		c.APIToken = Secret(v)
+	}
+
+	if v, ok := lookup("DATABASE_URL"); ok {
+		c.DatabaseURL = Secret(v)
+	}
+
+	if v, ok := lookup("RATE_LIMIT"); ok {
+		n, e := strconv.Atoi(v)
+		if e != nil {
+			errs = append(errs, fmt.Errorf("RATE_LIMIT %v 无效: %w", v, e))
+		} else {
+			c.RateLimit = n
+		}
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -280,8 +315,14 @@ func (c Config) Validate() error {
 	if c.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("配置项 ShutdownTimeout 必须为正"))
 	}
+	if c.IdleTimeout <= 0 {
+		errs = append(errs, errors.New("配置项 IdleTimeout 必须为正"))
+	}
 	if c.MaxBodyBytes <= 0 {
 		errs = append(errs, errors.New("配置项 MaxBodyBytes 必须为正"))
+	}
+	if c.RateLimit <= 0 {
+		errs = append(errs, errors.New("配置项 RateLimit 必须为正"))
 	}
 	if c.LogFormat != "text" && c.LogFormat != "json" {
 		errs = append(errs, fmt.Errorf("配置项 LogFormat=%q 必须是 text 或 json", c.LogFormat))

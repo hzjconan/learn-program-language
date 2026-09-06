@@ -35,6 +35,15 @@ type Order struct {
 	Items      []Item
 }
 
+// ComputeTotal 按 Items 重算 TotalCents。
+func (o *Order) ComputeTotal() {
+	var t int64
+	for _, it := range o.Items {
+		t += int64(it.Qty) * it.PriceCents
+	}
+	o.TotalCents = t
+}
+
 // Item 是订单里的一行商品。
 type Item struct {
 	ID         int64
@@ -72,6 +81,11 @@ type ListFilter struct {
 	Limit int
 }
 
+// IsStatusValid 检查 ListFilter.Status 是否合法。
+func (l ListFilter) IsStatusValid(s string) bool {
+	return s == StatusPending || s == StatusPaid || s == StatusShipped || s == StatusCancelled
+}
+
 // DefaultLimit 是 List 不指定 Limit 时的默认条数。
 //
 // ⚠️ 列表接口【必须】有上限。没有 LIMIT 的查询在表长大之后会
@@ -93,6 +107,15 @@ const MaxLimit = 500
 //     写进 o.ID / o.CreatedAt
 //   - 逐条插 order_items，把生成的 id 写回 o.Items[i].ID
 //   - TotalCents 由服务端算：sum(qty * price_cents)，【不要】信调用方传的值
+//
+// ⚠️ D14 补充：这条其实【放错层了】。sum(qty×price) 是业务规则，
+// 应该由 Order 自己（一个 ComputeTotal 方法）算、由 service 决定何时算，
+// repository 只负责持久化它收到的东西 —— 见 ordersvc.Place 的注释。
+//
+// 这里保留是因为 D13 的测试已经锁住了这个行为。D14 做到 service 层时，
+// 你可以选择：（a）把它挪到 Order.ComputeTotal 并改掉 D13 那条测试，
+// 或（b）留着当一道廉价的兜底，但要清楚它不是这一层的职责。
+// ⭐ 两种都行，但要【想清楚再选】，别是「没注意到」。
 //
 // 错误翻译（§8，用 errors.As 拿 *pgconn.PgError 看 Code）：
 //
@@ -117,7 +140,7 @@ func (r *Repo) Create(ctx context.Context, o *Order) (err error) {
 		}
 	}()
 
-	insertOrderSQL := "INSERT INTO orders (customer, note, status, total_cents) VALUES ($1, $2, COALESCE($3, 'pending'), $4) RETURNING id, created_at"
+	insertOrderSQL := "INSERT INTO orders (customer, note, status, total_cents) VALUES ($1, $2, COALESCE($3, 'pending'), $4) RETURNING id, created_at, status"
 
 	o.TotalCents = 0
 	for _, v := range o.Items {
@@ -136,7 +159,7 @@ func (r *Repo) Create(ctx context.Context, o *Order) (err error) {
 		status = &o.Status
 	}
 
-	if oerr := tx.QueryRowContext(ctx, insertOrderSQL, o.Customer, note, status, o.TotalCents).Scan(&o.ID, &o.CreatedAt); oerr != nil {
+	if oerr := tx.QueryRowContext(ctx, insertOrderSQL, o.Customer, note, status, o.TotalCents).Scan(&o.ID, &o.CreatedAt, &o.Status); oerr != nil {
 		var pge *pgconn.PgError
 		if errors.As(oerr, &pge) && pge.Code == "23514" {
 			return apperr.Invalid("订单参数不合法", oerr)

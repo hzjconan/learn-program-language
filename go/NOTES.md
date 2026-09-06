@@ -2559,7 +2559,66 @@ rows, err := db.QueryContext(ctx, q, customerId)
 
 #### 实际跑完的验证结果（对了/错在哪）
 
-（跑完补这里）
+| A1 | A2 | A3 | A4 | A5 | A6 | A7 | A8 |
+|---|---|---|---|---|---|---|---|
+| ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+
+**A1 ✅** —— 准确。补一句：那段代码真正的危害是它还打印了「数据库连接成功」——
+**一句谎话**。故障发生时你会盯着这行日志排除掉「连不上」这个可能。
+
+**A2 ✅** —— 泄漏判断完全正确。补充：① 虽然不泄漏，但它 `rows.Scan` 忽略错误、
+也没查 `rows.Err()`，**会静默丢数据**（§5）。两段都错，只是错法不同：
+**② 泄漏连接，① 丢数据。** 而且两段都没写 `defer rows.Close()`。
+
+**A3 ⚠️ 答了另一个问题** —— 「另一个事务改了数据、当前快照看不见」这个观察本身对
+（Postgres 单条语句确实取快照），但题目问的是**这段代码**：
+
+```go
+rows.Scan(&o.ID)        // ⚠️ 错误被忽略
+...
+return out, nil         // ⚠️ 没查 rows.Err()
+```
+
+答案是**不能，因为没查 `rows.Err()`** —— 迭代可能在第 100 行之后失败了，
+`Next()` 安静返回 false，你拿着 100 行当全部（§5 那个 49999 行的实测）。
+
+⚠️ 两者性质不同：「数据可能变了」是分布式系统的**固有性质**，
+「不知道读全没有」是**代码 bug**。→ `MISTAKES.md` #23
+
+**A4 ✅** —— 准确。
+
+**A5 ❌ 两个都没答到** —— 题目那段的两个错误是：
+
+**错误 1（关键）：`r.db.ExecContext` 而不是 `tx.ExecContext`。**
+§7 要点 4 专门标的「最隐蔽的 bug」—— `db.` 会从池里【另拿一条连接】，
+那条语句根本不在事务里。实测：
+
+```
+池上限 5：  外键约束失败（订单还没提交，对另一条连接不可见）
+池上限 1：  等了 1.997s → context deadline exceeded  ⭐ 死锁
+```
+
+⚠️ **同一段代码，池大小不同，故障形态完全不同**。开发环境池大不出事，
+生产环境高并发把池占满时才爆。→ `MISTAKES.md` #24
+
+**错误 2：`defer tx.Rollback()` 吞掉返回值。** 答的「没处理 ErrTxDone」对了一半 ——
+`ErrTxDone` 确实要忽略，但**其他回滚错误必须上报**。
+⭐ 这条正好照出自己代码里的同类问题：`errors.Join(err)` 漏传 `rbe`。
+
+答的「`QueryRowContext` 没检查 `sql.ErrNoRows`」不成立 ——
+那是 `INSERT ... RETURNING`，必然返回一行。
+
+**A6 ✅** · **A8 ✅** —— 准确。
+
+**A7 ✅ 结论对，但「先看什么」答成了「先想什么」** ——
+机制说对了（在死等连接、没出错所以日志里没东西）。
+但题目问的是**先看什么**，「翻代码找泄漏」是最后一步：
+
+1. **`db.Stats()`** —— `WaitCount` 涨 + `InUse` 顶到 `MaxOpenConns` = 石锤（§4.3）
+2. **goroutine dump**（`/debug/pprof/goroutine`，D16）—— 一堆卡在 `sql.(*DB).conn`
+3. 定位到哪个接口，再去翻那段代码
+
+⭐ **先看指标，再看代码。** 把 `db.Stats()` 暴露成 metric 就是为了这一刻。
 
 ---
 
@@ -2609,4 +2668,389 @@ B5：
 
 ### Claude 的批改
 
-（review 后补）
+#### 代码
+
+`make check` 全绿、`-race` 干净、覆盖率 87.8%、**变异测试 7/9**
+（存活 2 条是事先分析过测不出确定性差异的 `rows.Err()`）。
+
+**做对的**：`rows` 三件套一次没漏（`defer rows.Close()` 都在 err 检查之后）；
+`Get` 主动从 INNER JOIN 改成了两次查询；错误翻译分得清且 `pgErr` 细节没漏给用户。
+
+**review 出的四条**（1–3 已改，4 讨论后保留）：
+
+1. **`errors.Join(err)` 漏传 `rbe`** —— 判断出「回滚失败」然后把它扔了。
+   ⭐ 实测证明进入该分支时 `err` **必然非空**（`Commit` 无论成败都会让后续
+   `Rollback` 返回 `ErrTxDone` 被条件过滤掉），所以写成 `err = rbe` 会**盖掉业务错误**：
+   客户端会收到 500 而不是 409，日志里也只剩「连接被终止」。
+2. **`tx.Commit()` 的错误被 `//nolint` 压掉** —— ⚠️ 今天最严重的一条。
+   commit 失败时函数返回 `nil`，调用方以为下单成功但一行都没写进去，测试抓不到。
+   ⭐ **`nolint` 是「我想清楚了这里确实不用处理」的声明，不是消除告警的开关。**
+3. **`Get` 里两个立即执行的闭包** —— 第一个没有任何作用；
+   第二个导致错误路径 `return o, err` 返回了半成品对象。
+4. **`List` 的 `where 1=1`** —— 能用，但是个权衡（SQL 里多了恒真条件）。
+   讨论后保留，知道代价即可。
+
+#### 小题 B
+
+| B1 | B2 | B3 | B4 | B5 |
+|---|---|---|---|---|
+| ✅ | ✅ | ⚠️ | ⚠️ | ✅ |
+
+**B1 ✅ 算得对**（`6 × 13 = 78 ≤ 80`）。补两点：实测这个库
+`max_connections=100`、`superuser_reserved=3`，**普通用户实际可用 97**，
+而且还要分给迁移 job、监控、psql。
+⭐ 更稳的做法是**从需求倒推而不是从上限倒推**：`MaxOpenConns` 应该 ≈
+峰值 QPS 下真正需要的并发查询数（用 `WaitCount` 观测），通常比你以为的小。
+**连接池大不等于吞吐高**——数据库端 CPU 核数才是瓶颈。
+
+**B2 ✅** —— 准确。
+
+**B3 ⚠️ 漏了提示指向的那一半** —— 前半段（为什么要 limit）说得好，
+但「客户端要全部数据怎么办」答的是「提供分页机制」，没说出**为什么普通分页也不够**。
+实测 50 万行：
+
+| | OFFSET 0 | OFFSET 100000 | OFFSET 300000 | OFFSET 490000 |
+|---|---|---|---|---|
+| `LIMIT 50 OFFSET n` | 0.068ms | 16.1ms | 44.5ms | **72.3ms** |
+| `WHERE id > n LIMIT 50` | 0.068ms | 0.081ms | 0.073ms | **0.078ms** |
+
+⭐ `OFFSET` 要求数据库**扫过并丢弃**前 n 行，线性退化。
+正确答案是 **keyset（游标）分页**，代价是不能跳页。→ `MISTAKES.md` #25
+
+**B4 ⚠️ 太薄** —— 「SQL 不可预测、性能难查」是讲义原话。两条更硬的：
+
+① **代价出现的时间不对称**：GORM 省的是第一周的时间，付的是第六个月的时间。
+⭐ 而 `sqlc` 让你第一周就写 SQL，之后一直不用还债。
+
+② **`sqlc` 拿到了 ORM 想要的全部好处却没放弃 SQL** —— 类型安全的结构体、
+不用手写 Scan、编译期发现列名写错。所以「用 GORM 因为开发快」这个论点
+**在 sqlc 面前不成立**：不是「快 vs 慢」，是「快 vs 一样快但可预测」。
+
+可接受场景再补一个更实际的：**团队已经全员 GORM** ——
+一致性的价值可能高于技术优劣。
+
+**B5 ✅ 三个方案都考虑到了** —— 补两条大事务更致命的代价：
+**WAL 膨胀**、**阻塞 vacuum**（长事务让 Postgres 无法回收死元组，拖垮整库）。
+另外「一个订单一个事务」也有代价没提：**1000 次网络往返**。
+生产上更常见的是**分批**（每 50–100 个一个事务）。
+
+⭐ 而且不管选哪个，**批量导入必须有幂等键** —— 因为重试是必然的。
+给每个订单一个客户端生成的 `idempotency_key` 加唯一约束，
+重复提交直接命中冲突而不是插两遍。这条比事务粒度更重要。
+
+---
+
+## D14 · 周综合项目：REST API 服务
+
+### 我的笔记
+
+- 反直觉：
+- 踩的坑：
+- 没搞懂：
+
+---
+
+### 设计决策
+
+**405 的响应体保留 `ServeMux` 的默认行为（纯文本），不统一成 JSON。**
+
+现状：API 所有错误响应都是 `{"error":"..."}`，唯独 405 是
+`http.ServeMux` 自动生成的纯文本 `Method Not Allowed`（`Content-Type: text/plain`）。
+
+**决定：不改。** 理由：
+
+- 405 由框架生成，客户端本来就该**先看状态码**再决定要不要解析 body
+- 要统一得在 `NewRouter` 出口包一层 `ResponseWriter` 拦截 404/405，
+  还得处理三个细节（Content-Type 判断、吞掉 mux 写的纯文本、`Unwrap()` 别丢
+  `Flusher`/`Hijacker`）—— 代价大于收益
+- 标准库 `ServeMux` 没有 `MethodNotAllowed(h)` 这种钩子（`chi` 有），
+  这是它的已知短板
+
+⚠️ 知道这个不一致存在，是**想清楚后的取舍**，不是没注意到。
+对应的测试 `TestAPI_MethodNotAllowedReturnsJSON` 已删除，
+`TestAPI_MethodNotAllowed`（只断言状态码 405）保留。
+
+---
+
+### 小题 A · 推理题（先想，别跑代码）
+
+**A1.** 下面两种写法都能跑。它们在**依赖**上有什么区别？为什么这个区别重要？
+
+```go
+// ①
+package ordersvc
+import "…/internal/orders"
+type Service struct{ repo *orders.Repo }
+
+// ②
+package ordersvc
+type Repository interface{ Get(ctx context.Context, id int64) (*orders.Order, error) }
+type Service struct{ repo Repository }
+```
+
+**A2.** `internal/orders` 包里**没有**任何一行写着「我实现了 `ordersvc.Repository`」。
+那编译器是怎么知道 `orders.NewRepo(db)` 能传给 `ordersvc.New` 的？
+如果哪天 `Repository` 加了一个方法而 `orders.Repo` 没跟上，错误会在什么时候出现？
+
+**A3.** 这三条规则各应该放在哪一层（handler / service / repository）？为什么？
+
+1. 「订单必须至少有一个商品」
+2. 「`limit` 超过 500 要截断」
+3. 「`/orders/abc` 这种路径应该返回 400」
+
+**A4.** 下面这个 handler 有什么问题？（至少两处）
+
+```go
+func handleCreate(w http.ResponseWriter, r *http.Request) {
+	var o orders.Order
+	json.NewDecoder(r.Body).Decode(&o)
+	if err := svc.Place(r.Context(), &o); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	json.NewEncoder(w).Encode(o)
+}
+```
+
+**A5.** 这段优雅关闭的代码有个 goroutine 泄漏，在哪？
+
+```go
+errCh := make(chan error)
+go func() { errCh <- srv.ListenAndServe() }()
+
+select {
+case err := <-errCh:
+	return err
+case <-ctx.Done():
+	return srv.Shutdown(context.Background())
+}
+```
+
+**A6.** 为什么 `main` 里要写成 `run() error` 而不是直接 `log.Fatal(err)`？
+说出**两个**理由。
+
+**A7.** 一个 `/healthz` 只返回 `{"status":"ok"}`，不查任何依赖。
+它在什么情况下会给你造成**比没有健康检查更糟**的后果？
+
+**A8.** service 层的测试用了一个手写的 `fakeRepo`，没有连数据库。
+这样测出来的东西，和「连真库测」相比，**少验证了什么**？
+这个取舍为什么仍然值得？
+
+#### 我的答案
+A1: 第一种写法会把“internal/orders”包里所有东西都依赖进来，实际上可能只需要里面"数据库操作"相关的东西。第二种写法相当于把对"数据库操作"依赖以“Repository”接口的形式定义在了自己这里（消费者），internal/orders包里的相关代码并不知道自己符合这里定义“Repository”，只是“碰巧”正好符合定义。这是利用go里面interface的特性，可以做“后绑定”。
+
+A2：`internal/orders`里面的代码实际上包含了`orders`需要的能力，通过go的interface机制，把`internal/orders`里面的代码“适配”成了Repository接口的实现。如果哪天 `Repository` 加了一个方法而 `orders.Repo` 没跟上，错误会在编译的时候出现 - 在interface里定义的新方法，没有被实现，所以就不是这个接口的实现了。
+
+A3：
+1. 「订单必须至少有一个商品」- 放service层，因为这是业务逻辑，需要在service层校验。在repository层，只是负责数据库操作，不负责业务逻辑，而数据库层面，插入一条订单数据，并不需要插入对应的商品数据。
+2. 「`limit` 超过 500 要截断」- 放service或repositpry层，可以优先考虑放service，因为数据库层面本身没有limit不能超过500的限制。
+3. 「`/orders/abc` 这种路径应该返回 400」- 放handler层，因为这是http请求的路径，需要在handler层校验。
+
+A4: 
+1.json decoder没有使用`DisallowUnknownFields`方法，这样如果前端传入了一些不支持的字段，不会被检测出来，也许不会造成实际问题，但是不严谨。
+2.在http数据传输层（请求/响应）和业务领域层使用了同一个struct，这样无法处理某个字段“没传值”和“传了go里面的零值”。比如某个bool类型字段，前端传了false和前端压根没传这个字段，到了go这里都是false。
+
+A5：errCh没有开缓冲，这会导致代码走到了下面`ctx.Done`分支的时候，errCh会阻塞，导致goroutine泄漏。
+
+A6：log.Fatal会导致程序退出，这意味着：
+1. defer不会被执行
+2. server被关闭
+
+A7：`/healthz`只表示go的web server本身能被访问到，但如果有其他问题，比如和数据库的连接，某个业务api有问题都不会反映出来，特别是数据库连接问题，这往往意味着其实整个后段不可用，相当于健康检查接口在说谎了。这种情况可能比没有健康检查更糟，会造成误判。
+
+A8: 用`fakeRepo`没法验证和数据库实际交互的结果（sql是不是对，性能有没有问题，连接有没有被释放等）。但是这些本身可以在repository层被测试，所以在service层引入`fakeRepo`并不会使测试更弱，它只会让这一层的测试依赖性降低，只focus这一层本身的逻辑实现。
+
+#### 实际跑完的验证结果（对了/错在哪）
+
+| A1 | A2 | A3 | A4 | A5 | A6 | A7 | A8 |
+|---|---|---|---|---|---|---|---|
+| ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ |
+
+**A1 ✅** —— 「后绑定」这个说法准确。
+
+**A2 ✅ 对，但漏了最要紧的一半** —— 「编译时出现」正确，
+但**错误出现在哪个包**？实测（给 `Repository` 加一个 `orders.Repo` 没实现的方法）：
+
+```
+# github.com/hzjconan/learn-program-language/go/cmd/api
+cmd/api/main.go:89:22: cannot use repo (variable of type *orders.Repo)
+  as ordersvc.Repository value: *orders.Repo does not implement
+  ordersvc.Repository (missing method Archive)
+```
+
+⭐ **报在 `cmd/api/main.go` —— 组装的地方。** `orders` 和 `ordersvc` 各自都编译得好好的。
+
+这是隐式接口的直接后果：**「谁满足谁」只在被赋值的那一刻才检查**。
+好处是解耦，代价是**改接口的人和看到报错的人可能隔得很远**。
+
+> 想让报错出现在实现方，可以在 `orders` 里加 `var _ ordersvc.Repository = (*Repo)(nil)`，
+> ⚠️ 但那样 `orders` 就要 import `ordersvc`，**依赖方向反了** —— 本末倒置，所以通常不这么做。
+
+**A3 ⚠️ 第 2 小题理由不对** —— 1 和 3 ✅。
+
+第 2 题「limit 超过 500 要截断」，答的理由是「数据库层面本身没有这个限制」——
+**推理反了**。这条规则的目的不是镜像数据库约束，而是**保护数据库和内存不被打爆**
+（§11：没有 LIMIT 的查询在大表上会一次拉几百万行）。
+放 service 或 repository 都行，但理由应该是「放哪里能保证所有入口都受保护」。
+
+⚠️ 顺带：**代码里它在 repository**（D13），和这里答的「优先 service」不一致。
+
+**A4 ⚠️ 答的两条都对，但漏了更严重的** —— 题目要求「至少两处」，达标了。
+但那段代码里最严重的两个没提到：
+
+```go
+json.NewDecoder(r.Body).Decode(&o)     // ⚠️ 错误被完全忽略
+http.Error(w, err.Error(), 500)        // ⚠️ 两个问题
+```
+
+① **`Decode` 的错误没检查** —— 请求体是 `not json` 时 `o` 保持零值，
+拿一个**空订单**去下单，客户端收到 201。
+
+② **`http.Error(w, err.Error(), 500)`** 违反 D12 §5 的两条：
+把 `err.Error()`（含内部细节）给了客户端；状态码硬编码 500，
+参数校验失败也返回 500。→ `MISTAKES.md` #27
+
+**A5 ✅** —— 缓冲那条完全对。
+
+**A6 ⚠️ 只答到一半** —— 「defer 不会被执行」✅。
+第二条「server 被关闭」不是**反对** `log.Fatal` 的理由，那是它的正常行为。
+
+漏掉的那条更重要：⭐ **`run() error` 让测试能调用它。**
+`func main()` 没有返回值、直接 `os.Exit`，**根本没法在测试里跑**。
+
+**A7 ✅** —— 「相当于健康检查接口在说谎了」说得好。
+补一个具体后果：**K8s 不会重启也不会摘流量**，故障一直挂着 ——
+比没有健康检查更糟，正是因为它给了虚假的安全感。
+
+**A8 ✅ 今天答得最好的一题** —— 「这些本身可以在 repository 层被测试，
+所以在 service 层引入 fakeRepo 并不会使测试更弱」。
+这就是测试金字塔的核心：**每一层只测它自己的职责，不重复测下层已经保证的东西。**
+
+---
+
+### 小题 B · 设计题（可以查文档，要写理由）
+
+**B1.** 讲义 §2.3 说本课的结构**没有**拿到「依赖隔离」这个收益——
+`ordersvc` 和 `orders` 一样依赖 218 个包。
+请说明：（a）为什么会这样；（b）拆出 `internal/domain` 之后会变成什么样；
+（c）你认为这个项目**值不值得**拆，理由是什么。
+
+**B2.** 现在 `Place` 的业务校验（至少一个 item、SKU 不重复…）在 service 层。
+产品说要加一条规则：「同一个客户 1 分钟内不能下超过 3 单」。
+这条规则该放哪？需要哪些新的依赖？会不会破坏你现在的分层？
+
+**B3.** `api` 包定义了 `OrderService` 接口，`ordersvc` 定义了 `Repository` 接口。
+如果哪天要加一个 gRPC 入口，你需要改动哪些包？
+如果要把 Postgres 换成 MongoDB 呢？用这两个问题检验你的分层。
+
+**B4.** 讲义 §6 说「Go 社区不爱 mock 框架」。
+你写完 `fakeRepo` 和 `fakeSvc` 之后，同意这个说法吗？
+说出你认为**假实现比 mock 框架好**的一点，和**mock 框架确实更方便**的一个场景。
+
+**B5.** 现在服务是单体：一个进程里 handler / service / repository 全都有。
+如果 QPS 涨到单机扛不住，你会先做什么？
+（提示：先想清楚瓶颈在哪——是 Go 进程的 CPU，还是数据库连接，还是别的。
+D13 §12 和 §11 的实测数据可能有用。）
+
+#### 我的答案
+B1: 因为service这一层需要依赖"domain model"，也就是这里的`Order` struct。所以相当于依赖了整个`internal/orders`包，所以“在service层去定义repository接口”并没有在减少依赖方面享受到任何好处。
+要使这个做法真正奇效，我们应该把这些domain model放到一个单独的包，service层只依赖这些domain model的包。目前这个项目里还不值得拆，因为目前代码还比较简单，数量也不多。
+
+B2: 「同一个客户 1 分钟内不能下超过 3 单」这条规则可以考虑放在handler层，因为这本事上是限制api请求的数量，属于限流。它不会破坏现有的分层设计，在handler层可以通过middle ware机制，透明地增加限流机制 - 在这个问题里，可以增加一个只针对下单接口的限流middle ware
+
+B3: 引入"gRPC"应该在handler层做适配，后面的service/repository层完全不用动。“把 P
+ostgres 换成 MongoDB”应该在repository层做改动，不影响上层代码。
+
+B4: 基本同意，在验证某个函数输入/输出是不是符合预期时，没有传统的mock框架也行（前提是做了合理的依赖注入设计，可以注入fake的实现）。但是这在需要验证函数内部实现方式，比如是不是多执行了某些无用的repository的方法等，就不太方便了，虽然也可以自己实现（修改fakeRepo内的方法，去做统计），但这样要求每次都要重新造轮子，这就不如使用现成的mock框架来的方便了。
+
+B5: 先看瓶颈在哪，如果是外部依赖，比如数据库，那就需要增强那头的处理能力。如果是go程序本身，那看压力在cpu还是内存（硬盘存储一般不太可能成为瓶颈，除非有不合理的超量日志）。这时候我们可以考虑
+a. 增加服务器硬件能力 - 升级cpu/内存
+b. 水平扩容 - 用更多态服务器来承接/处理流量。但这要求api设计必须是无状态的，不能某个api记录了某个状态（比如把用户购物车内容存自己内存里），然后下一个api call会依赖这个状态，比如“结算”，因为“结算”这个请求可能被分配到另一台服务器，那里面看不到存在另一个服务器内存里的购物车数据。
+
+---
+
+### Claude 的批改
+
+#### 代码
+
+`make check` 0 issues、全仓库测试全绿、端到端跑通（14 条访问日志、SIGTERM 优雅关闭）。
+
+**做对的**：分层守住了（`ordersvc` 没有 `http`/`sql`，`api` 没有业务规则）；
+状态机干净（`switch` + 默认 false，未知状态天然安全）；
+优雅关闭三个细节全对（缓冲 channel、`Shutdown` 用全新 ctx、`ErrServerClosed` 不当错误）；
+`healthz` 真的 Ping 数据库且失败时不泄漏错误；`nolint` 都写了理由。
+
+**review 出的 6 个问题**：
+
+第一轮（静态 review）：
+
+1. **`o, _ := svc.Get(...)`** —— pay/cancel 里各一处。实测让 `Pay` 成功但紧接着的
+   `Get` 失败 → `toResponse(nil)` **空指针 panic**。
+   ⚠️ 后果比 panic 更糟：`Recover` 兜成 500，但**支付其实已经成功了**，
+   客户端重试 → 重复支付。lint 已经报了这条。
+2. **SKU 去重只比较相邻元素** —— 实测 `[A A]` 拦得住，`[A B A]`、`[A B C D A]` 直接放行。
+   要用 `map` 做 set。
+3. **Qty 错误消息说反了** —— `Qty = -5` 时返回「Qty -5 超过最大值 1000」，字面上就是错的。
+
+第二轮（端到端跑真服务）：
+
+4. **`List` 没走 DTO** —— 返回的是 `{"ID":1,"Customer":...}`（Go 字段名），
+   而单个订单是 `{"id":1,"customer":...}`。⚠️ 领域模型泄漏：
+   将来给 `orders.Order` 加内部字段会**自动出现在 API 响应里**。
+5. **`Create` 的 `RETURNING` 漏了 `status`** —— 下单返回 `"status":""`，
+   查询返回 `"status":"pending"`。⭐ **凡是数据库会填/改的列都要 RETURNING 回来**；
+   `created_at` 容易想到，`status` 容易漏（默认值在 schema 里，不在代码里）。
+6. **405 不是 JSON** —— 讨论后**决定不改**，理由见上面「设计决策」一节。
+
+⚠️ **4 和 5 我的测试都没抓到**，已补：
+
+- `TestAPI_ListUsesResponseDTO` —— 原来的 `ListEmptyIsArrayNotNull` 只测空列表，
+  **空数组里看不出字段名**
+- `TestOrders_CreateReturnsServerFilledColumns` —— 原来的 `CreateHappyPath`
+  查了 ID/CreatedAt/TotalCents/Items[i].ID，**唯独没查 Status**
+
+⭐ 两条都是同一个模式：**边界情况恰好掩盖了主路径的问题**（D6 那条「测试数据太乖」）。
+
+另外 `TestAPI_PayWhenReloadFails` 我第一版写错了 —— 用 `context.DeadlineExceeded`
+当底层错误，被 `apperr.HTTPStatus` 的 ctx 分支拦成 504，
+把「考错误不能被丢掉」变成了「考 ctx 映射顺序」。已换成普通错误。
+
+#### 小题 B
+
+| B1 | B2 | B3 | B4 | B5 |
+|---|---|---|---|---|
+| ✅ | ❌ | ✅ | ✅ | ⚠️ |
+
+**B1 ✅** —— (a)(b) 准确，(c) 的判断合理。补一条更明确的阈值：
+**等 repository 多起来（订单、用户、库存各一个包）时才开始划算** ——
+那时每个 service 都不该背上所有 repo 的依赖。
+
+**B2 ❌ 放错层了，而且和自己的 B3 矛盾** ——
+用 B3 里自己写下的判据检验：**加了 gRPC 入口之后，那条中间件还生效吗？不生效。**
+⭐ **判据自己会用，只是没想到要用。** → `MISTAKES.md` #26
+
+**B3 ✅** —— 简洁准确。
+
+**B4 ✅** —— 识别出了真实取舍（验证内部调用方式时手写计数不如 mock 框架方便）。
+补一个反向视角：**「验证调用次数」本身往往就是在测实现细节**。
+「校验失败时不该调 `repo.Create`」值得测（行为契约），
+「`Get` 恰好被调了 2 次」通常不值得 —— 重构一下就红了而行为没变。
+⭐ 需要频繁断言调用次数，常常是设计信号。
+
+**B5 ⚠️ 方向对，但没用上提示** —— 「先看瓶颈在哪」✅，垂直/水平扩容和无状态那段也对。
+但提示指向 D13 §12 和 §11，想要一条**具体且反直觉**的：
+
+⭐ **水平扩容 Go 进程，可能让数据库先死。**
+
+`实例数 × MaxOpenConns ≤ max_connections × 0.8`。现在 6 × 13 = 78，上限 100。
+**扩到 12 个实例，连接需求变成 156 —— 直接打爆数据库**（Postgres 每条连接是一个进程）。
+
+正确顺序：
+
+1. **先测量** —— `db.Stats()` 的 `WaitCount`/`WaitDuration`；pprof 看 CPU 花在哪
+2. **数据库瓶颈**：先查 N+1 和缺索引（§11 那个 437ms → 13.9ms，**31 倍**，比加机器划算）
+3. **要扩实例**：先上连接池代理（PgBouncer），否则连接数随实例数线性增长
+4. **最后才是**加机器 / 读写分离 / 分库
+
+⭐ **Go 进程通常不是瓶颈**（它便宜、并发好），瓶颈几乎总在数据库。
+盲目水平扩容会把问题从「服务慢」变成「数据库挂」。

@@ -1,0 +1,9 @@
+# ⚠️ 不加这个文件的话，COPY . . 会把 .git 和本地产物一起塞进构建上下文 ——
+# 构建变慢，而且 .git 里可能有你不想进镜像的东西。
+.git
+.gitignore
+*.md
+coverage.out
+deploy/
+lessons/
+/api

@@ -119,6 +119,58 @@ func TestOrders_CreateHappyPath(t *testing.T) {
 	}
 }
 
+// TestOrders_CreateReturnsServerFilledColumns 抓「RETURNING 漏了列」。
+//
+// ⚠️ 端到端实测发现的：POST /orders 返回的订单 status 是空字符串，
+// 而紧接着 GET 同一张订单，status 是 "pending"。
+//
+//	下单：{"id":1,...,"status":"",...}         ⚠️
+//	查询：{"id":1,...,"status":"pending",...}
+//
+// 原因是 Create 里写的是 `RETURNING id, created_at` —— 数据库的
+// DEFAULT 'pending' 生效了，但内存里的 o.Status 没被回填。
+// 于是刚下单的客户端拿到一个【没有状态】的订单。
+//
+// ⭐ 规则：**凡是数据库会填/会改的列，都要 RETURNING 回来。**
+// created_at 容易想到（它明显是数据库生成的），status 容易漏 ——
+// 因为它的默认值写在 schema 里，不在代码里。
+//
+// ⚠️ 原来的 TestOrders_CreateHappyPath 查了 ID / CreatedAt / TotalCents / Items[i].ID，
+// 唯独没查 Status，所以这个 bug 溜过去了。
+func TestOrders_CreateReturnsServerFilledColumns(t *testing.T) {
+	repo, _ := freshRepo(t)
+
+	o := sampleOrder()
+	o.Status = "" // 调用方不传状态，由数据库的 DEFAULT 决定
+	if err := repo.Create(context.Background(), o); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if o.Status != orders.StatusPending {
+		t.Errorf("Create 之后 o.Status = %q, want %q\n"+
+			"（⚠️ RETURNING 里漏了 status —— 数据库填了默认值，但没回填到内存对象）",
+			o.Status, orders.StatusPending)
+	}
+	if o.CreatedAt.IsZero() {
+		t.Error("Create 之后 o.CreatedAt 还是零值")
+	}
+
+	// ⭐ 关键断言：刚 Create 出来的对象，应该和从库里查回来的【完全一致】。
+	// 不一致就意味着「下单接口返回的东西」和「查询接口返回的东西」不同 ——
+	// 客户端会看到两套数据。
+	got, err := repo.Get(context.Background(), o.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != o.Status {
+		t.Errorf("Create 回填的 Status = %q，但库里是 %q —— 两个接口给客户端的数据不一致",
+			o.Status, got.Status)
+	}
+	if got.TotalCents != o.TotalCents {
+		t.Errorf("Create 回填的 TotalCents = %d，但库里是 %d", o.TotalCents, got.TotalCents)
+	}
+}
+
 // TestOrders_CreateIgnoresClientTotal 锁住「金额不信调用方」。
 //
 // ⚠️ 这是个安全问题，不只是数据一致性：如果直接采信请求里的 total，
