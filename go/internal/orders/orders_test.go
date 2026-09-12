@@ -1,3 +1,5 @@
+//go:build integration
+
 package orders_test
 
 import (
@@ -5,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,19 +17,10 @@ import (
 	"github.com/hzjconan/learn-program-language/go/internal/orders"
 )
 
-const defaultDSN = "postgres://devuser:devpass@localhost:5433/golearn?sslmode=disable"
-
 func dsn() string {
-	if v, ok := os.LookupEnv("DB_DSN"); ok && v != "" {
-		return v
-	}
-	return defaultDSN
+	return testDSN
 }
 
-// openDB 打开一个连接池；连不上就 skip 整个测试。
-//
-// ⚠️ Skip 不是「通过」。交作业前确认输出里【没有】 SKIP ——
-// 数据库没起的话这一整包等于没测。
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -40,7 +32,7 @@ func openDB(t *testing.T) *sql.DB {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close() //nolint:errcheck
-		t.Skipf("连不上数据库（%v）——先跑 `make db-migrate`", err)
+		t.Fatalf("连不上数据库: %v", err)
 	}
 	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 	return db
@@ -59,7 +51,7 @@ func truncate(t *testing.T, db *sql.DB) {
 	_, err := db.ExecContext(context.Background(),
 		`TRUNCATE order_items, orders RESTART IDENTITY CASCADE`)
 	if err != nil {
-		t.Fatalf("清表失败（表建了吗？先跑 make db-migrate）: %v", err)
+		t.Fatalf("清表失败: %v", err)
 	}
 }
 

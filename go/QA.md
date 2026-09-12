@@ -28,6 +28,7 @@
 | [17](#17-writetimeout-和-setwritedeadline-同时存在时谁说了算) | `WriteTimeout` 和 `SetWriteDeadline` 同时存在时谁说了算 | 网络 |
 | [18](#18-包装-sloghandler-为什么会丢字段) | 包装 `slog.Handler` 为什么会丢字段 | 标准库 |
 | [19](#19-非导出类型上的大写方法算导出吗) | 非导出类型上的大写方法，算导出吗 | 工程 |
+| [20](#20-recover-为什么救不了子-goroutine-里的-panic) | `recover` 为什么救不了子 goroutine 里的 panic | 并发 |
 
 ---
 
@@ -1211,3 +1212,145 @@ func (s *Store) Debug() string { ... }   // ⚠️ 这个是真的公开了，�
 **判据**：加方法前先看接收者类型是大写还是小写。小写随便加，大写要当成对外承诺。
 
 （相关：[#18](#18-包装-sloghandler-为什么会丢字段)、[#1](#1-cmd-目录是-go-的命名规范吗) 工程约定）
+
+
+---
+
+## 20. `recover` 为什么救不了子 goroutine 里的 panic
+
+**一句话**：⭐ **`recover()` 只能捕获【同一个 goroutine】里的 panic。**
+任何 goroutine 里未被 recover 的 panic 会**立刻终止整个进程**，
+只展开**它自己那条** goroutine 的 defer 栈。
+
+### 最小例子
+
+```go
+func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("main 抓到了:", r)   // ⚠️ 不会执行
+		}
+		fmt.Println("main 的 defer 跑了")    // ⚠️ 也不会
+	}()
+
+	go func() { panic("子 goroutine 炸了") }()
+
+	time.Sleep(500 * time.Millisecond)
+}
+```
+
+实测输出：只有 `panic: 子 goroutine 炸了` 和堆栈，**两行 Println 一行都没打**。
+
+### 场景一：`TestMain` 里清理不掉容器（D15）
+
+`TestMain` 用 testcontainers 起了 Postgres，想在测试全部跑完后销毁：
+
+```go
+func TestMain(m *testing.M) {
+	pg, _ := postgres.Run(ctx, ...)
+	code := m.Run()
+	pg.Terminate(ctx)     // ⚠️ 测试 panic 时到不了这里
+	os.Exit(code)
+}
+```
+
+**加 `defer` 也没用，加 `defer + recover` 也没用。** 堆栈说明了原因：
+
+```
+goroutine 36 [running]                          ← panic 在 g36
+created by testing.(*T).Run in goroutine 1      ← TestMain 在 g1
+```
+
+#### ⭐ `m.Run()` 的 goroutine 模型
+
+`m.Run()` **本身就在 `TestMain` 那条 goroutine（g1）上跑**，
+它给**每个测试函数各起一条** goroutine，然后阻塞等。
+标准库源码（`testing.go` 的 `(*T).Run`）：
+
+```go
+go tRunner(t, f)      // ⭐ 给这个测试起一条新 goroutine
+if !<-t.signal {      // ⭐ 父 goroutine 在这里【阻塞等】
+```
+
+```
+goroutine 1                       goroutine 36/37/…
+TestMain
+  └─ m.Run()        ← 在 g1 上
+       └─ t.Run("TestA")
+            ├─ go tRunner ────→   TestA 的函数体
+            └─ <-t.signal        ←  跑完发信号
+```
+
+⚠️ **默认是串行的**（父阻塞等子），起 goroutine **不是为了并发**，而是为了下面三件事。
+
+### ⭐ 为什么 testing 要给每个测试一条 goroutine
+
+| 理由 | 说明 |
+|---|---|
+| **`t.Fatal` 要能「只中止这个测试」** | 它的实现是 `runtime.Goexit()` —— 结束当前 goroutine 并跑它的 defer。只有测试独占一条 goroutine 这才可能，否则会把 `m.Run()` 整条链干掉 |
+| **`t.Parallel()`** | 实现就是「让父的别等了先返回」，这条 goroutine 挂着等统一调度 |
+| **超时检测** | 监控 goroutine 能看到卡住的测试还在 `running` map 里，然后 panic 报 `test timed out` |
+
+### ⭐ 由此推出：`t.Fatal` 和 `panic` 走的是两条路
+
+| 失败方式 | 机制 | `TestMain` 的清理 |
+|---|---|---|
+| **`t.Fatal` / `t.FailNow`** | `runtime.Goexit()`，**不是 panic** | ✅ **跑了** |
+| **`panic`** | 未 recover 的 panic 终止进程 | ❌ 跑不到 |
+| **`-timeout` 超时** | testing 包主动 panic | ❌ |
+| **`Ctrl-C`** | 信号杀进程 | ❌ |
+| `log.Fatal` / `os.Exit` | 直接退出 | ❌（跳过所有 defer） |
+
+⭐ **本质区别：`Goexit` 是「有序退出这条 goroutine」，`panic` 是「整个程序不行了」。**
+
+#### 那 `[recovered, repanicked]` 是谁干的
+
+是 `testing` 包自己，**在测试那条 goroutine 里**：它先 recover 是为了打印
+`--- FAIL` 和堆栈，然后**原地重新 panic** 让进程崩（这样退出码非零、CI 能发现）。
+⚠️ 重新 panic 仍在 g36，所以 g1 的 `TestMain` 还是够不着。
+
+#### 结论：交给 ryuk，两条路都要有
+
+```go
+code := m.Run()
+pg.Terminate(ctx)     // 正常路径 + t.Fatal 失败：立刻清
+os.Exit(code)         // panic / 超时 / Ctrl-C：ryuk 10 秒后兜底
+```
+
+**不是二选一** —— `Terminate` 立刻释放，ryuk 要等 10 秒（实测）。
+
+### 场景二：`Recover` 中间件也救不了子 goroutine（D11）
+
+```go
+func handler(w http.ResponseWriter, r *http.Request) {
+	go func() { panic("boom") }()    // ⚠️ 中间件救不了，整个进程崩
+}
+```
+
+D11 那个 `Recover` 中间件之所以平时能工作，是因为 `ServeHTTP` 和 handler
+**在同一条 goroutine 上**。⚠️ handler 里另起的 goroutine 不在保护范围内 ——
+**这是 HTTP 服务里一个真实的事故来源**：一个后台任务 panic，整个服务进程没了。
+
+⭐ 正确做法：**在每个你自己起的 goroutine 的入口加 recover**，
+或者用一个统一的 `go safeGo(func(){...})` 包装。
+
+### ⚠️ 场景三：子 goroutine 里不能调 `t.Fatal`
+
+```go
+go func() { t.Fatal("boom") }()   // ⚠️ 错的
+```
+
+`Goexit` 会结束**那条子 goroutine**，测试本身根本不知道发生了什么，
+**会继续跑下去并报告通过**。标准库文档明确写了这条。
+
+| 在子 goroutine 里 | 能用吗 |
+|---|---|
+| `t.Errorf` / `t.Logf` | ✅ 安全（只是记录，不改控制流） |
+| **`t.Fatal` / `t.FailNow` / `t.Skip`** | ❌ **不行** |
+
+正确做法：把错误通过 channel 传回测试 goroutine 再 `t.Fatal`。
+
+⚠️ 这个坑在**并发测试**里特别容易踩 —— D9 的 `racefix`、D11 的 `RateLimit`
+并发测试里都有 goroutine，值得回头检查。
+
+（相关：D2 §6 panic/recover、D8 goroutine、D11 §3 Recover 中间件、D15 §3）

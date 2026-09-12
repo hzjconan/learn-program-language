@@ -1,0 +1,64 @@
+# D15 §7：CI 流水线。
+#
+# TODO(D15)：这是个骨架，按讲义 §7 补完。
+#
+# ⚠️ 这个文件【必须放在仓库根】的 .github/workflows/ 下 ——
+# GitHub Actions 只扫描根目录，放在 go/.github/ 里它永远不会被执行。
+# （⭐ 又是一种「你以为跑着，其实从来没跑过」—— 和讲义 §3.1 的 t.Skip 同类。）
+#
+# 而 Go 项目在 go/ 子目录里，所以下面用 defaults.run.working-directory
+# 让所有 run 步骤都在 go/ 下执行。
+
+name: CI
+
+on: [push, pull_request]
+
+defaults:
+  run:
+    working-directory: go
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      # TODO(D15)：补上四步
+      #
+      #   ① 静态检查   golangci/golangci-lint-action@v6
+      #                ⚠️ 它有自己的 working-directory 参数，defaults 管不到
+      #   ② 单元测试   go test -race ./...
+      #                ⭐ -race 一定要开：它慢 5–10 倍，本地嫌烦可以不开，
+      #                   CI 没理由不开
+      #   ③ 集成测试   go test -race -tags=integration ./...
+      #                ⭐ testcontainers 在 GitHub Actions 上开箱即用
+      #                   （runner 自带 Docker）
+      #   ④ 覆盖率     go test -coverprofile=coverage.out ./...
+      #
+      # ⚠️ 第 ③ 步【必须真的跑】—— 否则又变成了另一种 skip：
+      # 你以为集成测试在 CI 上跑着，其实它从来没被执行过。
+      # ① 静态检查
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+          working-directory: go
+          args: --timeout=5m
+
+      # ② 单元测试 —— -race 一定要开
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+
+      # ③ 集成测试 —— testcontainers 在 GH Actions runner 上开箱即用
+      - name: Integration tests
+        run: go test -race -coverprofile=coverage.out -tags=integration ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: go/coverage.out

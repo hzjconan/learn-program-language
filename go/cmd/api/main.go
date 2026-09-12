@@ -10,8 +10,8 @@
 //	curl -s localhost:8080/orders/1
 //	curl -s -XPOST localhost:8080/orders/1/pay
 //
-// ⭐ 这个文件是【唯一】同时知道所有层的地方 —— 它就是 Go 的「依赖注入容器」：
-// 一个函数，几十行，编译期类型安全，没有反射也没有注解（D14 §2.2）。
+// ⭐ 本文件只做「进程级」的事：读配置、连库、起服务、优雅关闭。
+// 【组装】那一步在 internal/server 里 —— 见那个包的注释解释为什么。
 package main
 
 import (
@@ -28,11 +28,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // 副作用导入：注册 pgx 驱动（D13 §2）
 
-	"github.com/hzjconan/learn-program-language/go/internal/api"
 	"github.com/hzjconan/learn-program-language/go/internal/config"
-	"github.com/hzjconan/learn-program-language/go/internal/httpx"
-	"github.com/hzjconan/learn-program-language/go/internal/orders"
-	"github.com/hzjconan/learn-program-language/go/internal/ordersvc"
+	"github.com/hzjconan/learn-program-language/go/internal/server"
 )
 
 func main() {
@@ -84,25 +81,12 @@ func run() error {
 	}
 	defer db.Close() //nolint:errcheck // 程序关闭时关闭连接池，出错了也没办法了
 
-	// ④ 组装三层（唯一知道所有层的地方 —— 依赖注入）
-	repo := orders.NewRepo(db)
-	svc := ordersvc.New(repo)
-	router := api.NewRouter(svc, db, logger) // db 同时实现 Pinger
-
-	// ⑤ 挂中间件（D11 §4 顺序：RequestID → Recover → RateLimit → Logging）
-	recoverHandler := func(r *http.Request, rec any, stack []byte) {
-		logger.Error("panic recovered",
-			"panic", rec,
-			"path", r.URL.Path,
-		)
-	}
-	h := httpx.Chain(
-		router,
-		httpx.RequestID,
-		httpx.Recover(recoverHandler),
-		httpx.RateLimit(cfg.RateLimit, time.Minute),
-		httpx.Logging(logger),
-	)
+	// ④⑤ 组装三层 + 挂中间件
+	//
+	// ⭐ 组装逻辑在 internal/server 里，不在这个文件 —— 这样集成测试
+	// （internal/apitest）验证的是【真正会上线的那份组装】。
+	// 留在这里的话，测试只能重写一遍，中间件顺序配错都发现不了。
+	h := server.NewHandler(cfg, db, logger)
 
 	// ⑥ 起服务 + 优雅关闭
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

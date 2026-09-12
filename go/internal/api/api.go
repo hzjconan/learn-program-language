@@ -394,8 +394,8 @@ func parseListFilter(r *http.Request) (orders.ListFilter, error) {
 	if q.Has("limit") {
 		v := q.Get("limit")
 		n, err := strconv.Atoi(v)
-		if err != nil {
-			return f, apperr.Invalid(fmt.Sprintf("limit=%q 不是合法整数", v), nil)
+		if err != nil || n < 0 {
+			return f, apperr.Invalid(fmt.Sprintf("limit %q 不合法，必须是非负整数", v), nil)
 		}
 		f.Limit = n
 	}

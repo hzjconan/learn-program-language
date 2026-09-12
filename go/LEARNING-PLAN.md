@@ -6,6 +6,74 @@
 
 ---
 
+## 0'. ⚠️ 实际执行顺序（2026-09-11 调整）
+
+**用户要求把 K8s 提前**，实际按这个顺序走：
+
+```
+D15  测试进阶            ← 趁 D14 上下文还热
+D19  云原生基础 + Helm
+D20  写一个 Operator
+D16  可观测性            ← 给刚写的 operator 加 metrics
+D17  性能与内存
+D18  构建与交付
+D21  收尾 + 面试模拟
+```
+
+**编号不改**（讲义里大量交叉引用「D11 §8」「D12 §5」这类锚点），只调整执行次序。
+
+### ⚠️ 这个顺序的已知代价
+
+**D18（构建与交付）排在 D19/D20 之后**，而 D20 要构建 operator 镜像、
+`kind load` 进集群。我建议过把 D18 提前，用户听完理由后选择保持这个顺序。
+
+**用户的决定**：D20 时先按 kubebuilder 生成的东西用（`make docker-build` / `kind load` /
+`make deploy`），**不在 D20 里展开讲**；等 D18 再系统学。
+
+⚠️ 所以 **D18 必须补一节：带读 kubebuilder 生成的 `Dockerfile` 和 `Makefile`**，
+把 D20 当时「照着跑」的那些命令倒回来讲清楚。这是用户明确要求的安排，别漏。
+
+用户 D14 已经手写过多阶段 distroless 镜像（12.2MB），底子够；
+D18 要补的是**交叉编译**和 **`ldflags` 注入版本信息**这两块。
+
+⭐ 记在这里是因为：**「工具替你生成了但你看不懂」正是用户明确要避免的状态**
+（见下方 D19 的 Helm 专项说明——他对 Helm 的诉求是同一件事）。
+D20 是暂时接受这个状态，D18 是把债还掉。
+
+---
+
+## 0''. K8s 环境（2026-09-11 准备完成）
+
+⭐ **全部装在 `~/go/bin`，不需要 sudo** —— 那个目录在 PATH 最前面，
+新 `kubectl` 自然盖住了 `/usr/local/bin` 里 2021 年的旧版。
+
+| 工具 | 版本 | 装法 |
+|---|---|---|
+| `kubectl` | **v1.37.0**（原来是 v1.22.5，跨 15 个大版本） | 从 dl.k8s.io 下 darwin/arm64 二进制到 `~/go/bin` |
+| `kind` | v0.33.0 | `go install sigs.k8s.io/kind@latest` |
+| `helm` | v3.22 | `go install helm.sh/helm/v3/cmd/helm@latest` |
+| `kubebuilder` | v4.16.0 | `go install sigs.k8s.io/kubebuilder/v4@latest` |
+
+⚠️ 两个踩过的坑：
+
+1. **kubebuilder 的路径是根包**，不是 `/cmd`：
+   `sigs.k8s.io/kubebuilder/v4@latest`（写成 `.../v4/cmd` 会报 does not contain package）
+2. ⚠️ 原来的 `kubectl` v1.22.5 是硬问题 —— K8s 版本偏差策略是 ±1 个 minor，
+   它连不上现代集群的很多 API。**和 D0 时「Go 1.17 跑在 Rosetta 下」同一类问题：学老版本等于学错。**
+
+集群：`kind create cluster --name golearn`，上下文名 `kind-golearn`。
+
+```bash
+kind get clusters                    # 看有哪些集群
+kubectl config use-context kind-golearn
+kind delete cluster --name golearn   # 收工
+```
+
+⚠️ Docker Desktop 自带的 K8s **没启用**（`docker-desktop` 上下文连不上），
+也不打算用 —— 它的版本被锁在 Docker Desktop 的发布上，而这台机器上那个是 2021 年的。
+
+---
+
 ## 0. 教学约定
 
 每天的流程固定为四步，请按这个节奏跟我配合：
@@ -180,6 +248,7 @@
 - `testcontainers-go`：真实数据库集成测试
 - Fuzz 测试、golden file 测试
 - **练习**：给 D14 项目补齐单测 + 集成测试，CI 里能一键跑
+- 📖 讲解：[`lessons/D15.md`](lessons/D15.md) · 💻 练习：`internal/orders`（testcontainers）+ `internal/apitest` + fuzz + golden + CI
 
 ### D16 · 可观测性
 - OpenTelemetry：trace / metric 接入
