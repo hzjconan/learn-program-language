@@ -40,6 +40,7 @@
 | 25 | D13 | `OFFSET` 分页在大表上是线性退化 | 50 万行时 72ms vs keyset 的 0.078ms |
 | 26 | D14 | 业务规则放进了 handler 中间件 | 换个入口就绕过去了；判据自己会用却没用 |
 | 27 | D14 | `http.Error(w, err.Error(), 500)` | 泄漏内部细节 + 状态码硬编码 |
+| 28 | D15 | `os.Exit` 跳过 `defer`；`log.Fatal` 退的是进程 | 自己写对了，读题时指错了行；第四次 |
 
 ---
 
@@ -700,3 +701,60 @@ writeJSON(w, status, map[string]string{"error": msg})
 **重测角度**：给一段 handler（里面有 `http.Error(w, err.Error(), ...)`），
 问「这段代码会给客户端返回什么、有什么问题」；
 或者问「用户提交了一个格式错误的 JSON，你的接口返回几？」
+
+## 28 · D15 `os.Exit` 跳过 `defer`；`log.Fatal` 退的是进程不是 goroutine（小题 A5）
+
+**当时的答案**：题目给了这段 `TestMain`，问「容器不会被清理，bug 在哪」：
+
+```go
+func TestMain(m *testing.M) {
+    pg, err := postgres.Run(ctx, "postgres:17-alpine", ...)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer pg.Terminate(ctx)
+
+    os.Exit(m.Run())
+}
+```
+
+答的是「`log.Fatal(err)` 会导致这条 goroutine 退出，执行不到 defer」。**两处错**。
+
+**正确规则**：
+
+**① bug 在 `os.Exit(m.Run())`。** `os.Exit` 立即终止进程，**不执行任何 defer**。
+`defer pg.Terminate(ctx)` 注册了但永远不会跑——主路径上容器每次都泄漏。
+`log.Fatal` 那条是错误路径，而且 `Run` 失败时本来就没有可清理的容器（有也是 ryuk 的事）。
+正确写法是把清理放在 `os.Exit` **之前**、不用 defer：
+
+```go
+code := m.Run()
+terminate(pg)        // 用新的 ctx，见 D15 review
+os.Exit(code)
+```
+
+**② `log.Fatal` = `log.Print` + `os.Exit(1)`。** 退出的是**整个进程**，不是 goroutine。
+goroutine 级别的退出是 `runtime.Goexit()`（`t.FailNow`/`t.Fatal` 底下用的那个，
+它**会**跑 defer）。三条路要分清：
+
+| | 退出范围 | 跑 defer 吗 |
+|---|---|---|
+| `os.Exit` / `log.Fatal` | 整个进程 | ❌ |
+| `runtime.Goexit` / `t.Fatal` | 当前 goroutine | ✅ |
+| `panic` | 当前 goroutine 一路展开，没人 recover 就整个进程 | ✅（展开途中） |
+
+⭐ **注意这条和代码水平脱节，而且是第四次**：自己的 `main_test.go` 写的就是
+`code := m.Run(); terminate(pg); os.Exit(code)`，脚手架注释「四个坑」第 4 条原文就是
+「os.Exit 会跳过 defer」。**代码写对了，换成读别人代码就没认出同一个坑。**
+和 [#22](#22--d12-类型断言穿不透-w-包装小题-a6)、
+[#23](#23--d13-循环读完没报错不等于读全了小题-a3)、
+[#27](#27--d14-httperrorw-errerror-500-的两个问题小题-a4) 同一个模式。
+
+D21 面试模拟要专门针对这个模式出题：**给一段有已知坑的代码，让找问题**——
+考的不是知识点，是「把自己知道的规则主动套到别人代码上」这个动作。
+
+**重测角度**：
+- 给一段 `main()`：`defer db.Close()` 之后 `if err != nil { log.Fatal(err) }`，
+  问「`db.Close()` 会被调用吗？」
+- 问「`t.Fatal` 和 `log.Fatal` 各会让什么退出？各自的 defer 跑不跑？」
+- 反过来问：「一个在子 goroutine 里调 `t.Fatal` 的测试会发生什么？」（QA #20 场景三）

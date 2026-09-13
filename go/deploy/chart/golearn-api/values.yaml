@@ -1,0 +1,57 @@
+# golearn-api 的默认 values（D19 §6）。
+#
+# ⭐ 这个文件是「所有环境的公共默认值」，环境差异放 values-dev.yaml / values-prod.yaml，
+# 用 -f 叠加（§6.5 覆盖顺序：values.yaml < -f 文件 < --set）。
+#
+# 每个值都要能回答「哪个模板用了它」—— 没人用的值是垃圾。
+
+replicaCount: 1
+
+image:
+  repository: golearn-api
+  # tag 留空 → _helpers.tpl 里回退到 .Chart.AppVersion（§6.4 那条 default 管道）
+  tag: ""
+  # kind 集群里镜像是 kind load 进去的，不能去 registry 拉 —— 必须 IfNotPresent
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  # 容器端口，和 config.DefaultAddr 的 :8080 对上
+  targetPort: 8080
+
+# 非敏感配置 → ConfigMap（templates/configmap.yaml）
+# key 就是 internal/config 读的环境变量名
+config:
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+  RATE_LIMIT: "600"
+  READ_TIMEOUT: 5s
+  WRITE_TIMEOUT: 10s
+
+# 敏感配置 → Secret（templates/secret.yaml）
+# ⚠️ 默认值故意留空：prod 必须通过 -f / --set 传进来，
+#     模板里用 required 强制（§6.4）。别把真密码提交进 values.yaml。
+secrets:
+  DATABASE_URL: ""
+  API_TOKEN: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
+
+# dev 环境在集群里顺手起一个 Postgres（templates/postgres.yaml）。
+# prod 用外部数据库，enabled=false 时整个模板不渲染。
+postgres:
+  enabled: false
+  image: postgres:17-alpine
+  user: devuser
+  password: devpass
+  database: golearn
+
+# 数据库迁移 Job（templates/migrate-job.yaml，pre-install/pre-upgrade hook）
+migration:
+  enabled: true

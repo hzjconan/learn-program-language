@@ -1,4 +1,5 @@
 .PHONY: check test test-all race race-all lint fmt cover clean clean-containers \
+        helm-sync helm-template helm-template-dev helm-template-prod helm-lint helm-install-dev helm-uninstall kind-load \
         db-up db-migrate db-psql db-down
 
 # D15 起，带 //go:build integration 标签的测试（testcontainers、真库）
@@ -77,3 +78,38 @@ db-psql:
 
 db-down:
 	$(COMPOSE) down -v
+
+# ---------- D19 Helm / K8s ----------
+
+CHART = deploy/chart/golearn-api
+RELEASE ?= golearn
+
+# chart 只能读自己目录内的文件（.Files.Get 不能 ../），所以把迁移复制进去。
+# ⚠️ 权宜之计 —— 正解是把迁移打进镜像（D18）。files/migrations/ 是生成物，别手改。
+helm-sync:
+	mkdir -p $(CHART)/files/migrations
+	cp migrations/*.sql $(CHART)/files/migrations/
+
+helm-template: helm-sync
+	helm template $(RELEASE) $(CHART)
+
+helm-template-dev: helm-sync
+	helm template $(RELEASE) $(CHART) -f $(CHART)/values-dev.yaml
+
+# prod 形态只渲染不装。密码通过 --set 传，演示「不入库」。
+helm-template-prod: helm-sync
+	helm template $(RELEASE) $(CHART) -f $(CHART)/values-prod.yaml \
+		--set secrets.DATABASE_URL='postgres://u:p@db.internal:5432/golearn?sslmode=verify-full'
+
+helm-lint: helm-sync
+	helm lint $(CHART) -f $(CHART)/values-dev.yaml
+
+# 装进 kind。--wait 等 Pod Ready（否则 helm 返回时 Pod 还没起 —— D19 §2.4）。
+helm-install-dev: helm-sync
+	helm upgrade --install $(RELEASE) $(CHART) -f $(CHART)/values-dev.yaml --wait --timeout 2m
+
+helm-uninstall:
+	helm uninstall $(RELEASE)
+
+kind-load:
+	kind load docker-image golearn-api:latest --name golearn

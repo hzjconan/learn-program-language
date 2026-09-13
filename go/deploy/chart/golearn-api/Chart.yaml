@@ -1,0 +1,10 @@
+apiVersion: v2
+name: golearn-api
+description: D14 的订单 REST API（D19 Helm 练习）
+type: application
+
+# ⭐ 两个版本号是两件事（D19 §6.2）：
+#   version     chart 本身的版本 —— 模板改了就要升
+#   appVersion  里面跑的应用版本 —— 默认当镜像 tag 用（见 _helpers.tpl）
+version: 0.1.0
+appVersion: "latest"

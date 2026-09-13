@@ -85,12 +85,12 @@ kind delete cluster --name golearn   # 收工
 | 3. 编码 | 你 | 自己写，卡住了随时问我，但先别看答案 |
 | 4. 评审 | 我 | 逐行 review：正确性、惯用法（idiomatic）、并发安全、性能。**这一步是真正涨功力的地方** |
 
-**配套文件：** `lessons/` 每日讲义 · `QA.md` 随手问答手册 · `NOTES.md` 你的每日笔记 · [`MISTAKES.md`](MISTAKES.md) 错题本（D21 面试模拟会逐条重测）
+**配套文件：** `lessons/` 每日讲义 · `QA.md` 随手问答手册 · `notes/Dn.md` 你的每日笔记（`NOTES.md` 是索引） · [`MISTAKES.md`](MISTAKES.md) 错题本（D21 面试模拟会逐条重测）
 
 **给你的三条纪律：**
 1. 每道题写完先自己跑 `go vet ./...` 和 `go test -race ./...`，再交给我。
 2. 不要在心里把 Go 翻译成 Java。遇到"这在 Java 里是 XXX"的念头，把它写下来问我 —— 大部分情况下 Go 的答案是"不这么干"。
-3. 每天结束在 `NOTES.md` 里写 3 行：今天最反直觉的一点 / 踩的坑 / 还没搞懂的。
+3. 每天结束在 `notes/Dn.md` 里写 3 行：今天最反直觉的一点 / 踩的坑 / 还没搞懂的。
 
 ---
 

@@ -1,0 +1,18 @@
+{{/*
+TODO(D19)：dev 专用的集群内 Postgres。只在 .Values.postgres.enabled 时渲染。
+
+要求：
+  ① 整个文件包在 {{- if .Values.postgres.enabled }} ... {{- end }} 里，
+     enabled=false 时 helm template 的输出里【一个字节都不该有】——
+     注意空白控制，别留下一个只有 --- 的空文档（§6.3）
+  ② 一个 Deployment（1 副本，emptyDir 卷，数据不持久 —— 这是 dev）+ 一个 Service（5432）
+  ③ 环境变量 POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB 从 .Values.postgres 来。
+     ⭐ 用 with 把 .Values.postgres 提上来，少写几遍前缀 —— 但注意 with 里 . 变了，
+        要引用 .Release / .Chart 得用 $（§6.3 最常见的坑）
+  ④ Service 名字 = fullname + "-postgres"，values-dev.yaml 的 DATABASE_URL 要指向它
+  ⑤ readinessProbe 用 pg_isready（docker-compose.yml 里那条 healthcheck 搬过来）
+
+验证：
+  helm template t . | grep -c postgres           # 默认应该是 0
+  helm template t . -f values-dev.yaml | grep -c 'kind: '   # 比默认多 2 个
+*/}}

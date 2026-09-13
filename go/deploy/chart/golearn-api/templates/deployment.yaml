@@ -1,0 +1,50 @@
+{{/*
+Deployment 骨架。metadata / selector / 镜像这些已经写好，
+TODO(D19) 的部分是今天要练的模板语法。
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "golearn-api.fullname" . }}
+  labels:
+    {{- include "golearn-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "golearn-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "golearn-api.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{/*
+        TODO(D19) ①：ConfigMap 改了 Pod 不会自动重启（它只在启动时读环境变量）。
+        标准解法：把 ConfigMap 渲染结果的 sha256 写进 Pod annotation，
+        内容变 → annotation 变 → Pod template 变 → Deployment 滚动更新。
+          checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        Secret 同理。
+        */}}
+    spec:
+      containers:
+        - name: api
+          image: {{ include "golearn-api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          {{/*
+          TODO(D19) ②：把 ConfigMap 和 Secret 注入成环境变量。
+          用 envFrom（整个 ConfigMap/Secret 一次注入），不要一个 key 一个 env 地写。
+          Secret 那条要判断 .Values.secrets 有没有内容。
+          */}}
+          {{/*
+          TODO(D19) ③：探针。
+            readinessProbe  → GET /healthz（它会 Ping 数据库，D14）
+            livenessProbe   → 也是 /healthz？想一想：数据库挂了要不要重启 api Pod？
+                              重启能解决问题吗？写下你的选择和理由（小题 B2）。
+          */}}
+          {{/*
+          TODO(D19) ④：resources —— 用 toYaml + nindent 把 .Values.resources 整块放进来。
+          */}}

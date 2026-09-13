@@ -1,0 +1,12 @@
+{{ .Chart.Name }} 已安装为 release "{{ .Release.Name }}"（namespace {{ .Release.Namespace }}）。
+
+看 Pod：
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+本机访问：
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "golearn-api.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s localhost:8080/healthz
+{{- if .Values.postgres.enabled }}
+
+⚠️ 集群内 Postgres 已启用（dev 模式，emptyDir，Pod 重建数据就没了）。
+{{- end }}

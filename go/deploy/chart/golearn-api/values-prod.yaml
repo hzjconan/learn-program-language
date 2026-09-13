@@ -1,0 +1,21 @@
+# 生产形态（本课只 helm template 看渲染结果，不真装）。
+#
+# ⚠️ 注意这里【没有】secrets 段 —— 生产密码不进 git，
+# 由 CI/运维通过 --set secrets.DATABASE_URL=... 或另一个不入库的 -f 文件传入。
+# 模板里的 required 会在漏传时让 helm 直接报错，而不是部署一个连不上库的服务。
+
+replicaCount: 3
+
+image:
+  tag: "v1.4.2"
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+config:
+  RATE_LIMIT: "6000"

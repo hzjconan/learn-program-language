@@ -19,3 +19,6 @@
 
 # 覆盖率报告
 coverage.out
+
+# D19：chart 里的迁移副本由 make helm-sync 生成，源头是 go/migrations/
+go/deploy/chart/golearn-api/files/migrations/

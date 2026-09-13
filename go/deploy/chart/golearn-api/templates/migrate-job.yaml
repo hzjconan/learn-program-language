@@ -1,0 +1,28 @@
+{{/*
+TODO(D19)：数据库迁移 Job —— Helm hook（§6.6），接 D13 §9.2「迁移是独立的部署前步骤」。
+
+要求：
+  ① 只在 .Values.migration.enabled 时渲染
+  ② annotations:
+       "helm.sh/hook": pre-install,pre-upgrade
+       "helm.sh/hook-weight": "0"
+       "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+     ⭐ 每个 key 都要能回答「它是干什么的」（小题 A6）
+  ③ Job 用 postgres 镜像跑 psql（镜像里自带），SQL 从一个 ConfigMap 挂进来：
+       - ConfigMap 的内容用 .Files.Get "files/migrations/001_orders.sql"
+       - ⚠️ chart 只能读【chart 目录内】的文件，../../migrations 读不到 ——
+         所以 Makefile 加了 helm-sync 把 migrations/ 复制进 files/migrations/。
+         这是权宜之计，正解是把迁移打进镜像（D18）。
+       - 这个 ConfigMap 也要打同样的 hook annotation，否则 hook Job 跑的时候它还不存在
+         （hook 资源和普通资源是【分开】创建的 —— 小题 A7）
+  ④ DATABASE_URL 从 Secret 来（envFrom 或 secretKeyRef），psql 直接认 DATABASE_URL 吗？
+     不认 —— 它认 PGHOST/PGUSER/... 或者位置参数。psql "$DATABASE_URL" 可以。
+  ⑤ backoffLimit 给个小的数（3），restartPolicy: Never
+
+⚠️ 先读一遍 migrations/001_orders.sql 再决定它能不能直接当 pre-upgrade hook 跑。
+   想清楚每次 helm upgrade 会发生什么。这是小题 A8，也是今天最重要的一个坑。
+
+验证：
+  helm template t . -f values-dev.yaml --show-only templates/migrate-job.yaml
+  helm install ... 之后 kubectl get jobs / kubectl logs job/...
+*/}}
