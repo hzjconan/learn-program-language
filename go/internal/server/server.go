@@ -48,15 +48,22 @@ func NewHandler(cfg config.Config, db *sql.DB, logger *slog.Logger) http.Handler
 	svc := ordersvc.New(repo)
 	router := api.NewRouter(svc, db, logger)
 
+	mux := http.NewServeMux()
+	mux.Handle("GET /livez", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	mux.Handle("/", router)
+
 	// 挂中间件。顺序见 D11 §4：
 	//   RequestID  最外 —— 它用 r.WithContext 造新 request，放内层的话后面拿不到 ID
 	//   Recover    靠外 —— 要兜住所有内层的 panic
-	//   RateLimit  在业务之前拒绝，省下后面的开销
+	//   RateLimit  在业务之前拒绝，省下后面的开销，Unless(..., PathIs("/healthz","/livez"))，跳过readiness和liveness检查
 	//   Logging    要记录包括限流拒绝在内的所有请求
-	return httpx.Chain(router,
+	return httpx.Chain(mux,
 		httpx.RequestID,
 		httpx.Recover(onPanic(logger)),
-		httpx.RateLimit(cfg.RateLimit, time.Minute),
+		httpx.Unless(httpx.RateLimit(cfg.RateLimit, time.Minute), httpx.PathIs("/healthz", "/livez")),
 		httpx.Logging(logger),
 	)
 }

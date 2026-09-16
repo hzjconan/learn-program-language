@@ -1,5 +1,6 @@
 .PHONY: check test test-all race race-all lint fmt cover clean clean-containers \
         helm-sync helm-template helm-template-dev helm-template-prod helm-lint helm-install-dev helm-uninstall kind-load \
+        image kind-load-image deploy-dev \
         db-up db-migrate db-psql db-down
 
 # D15 起，带 //go:build integration 标签的测试（testcontainers、真库）
@@ -112,4 +113,31 @@ helm-uninstall:
 	helm uninstall $(RELEASE)
 
 kind-load:
-	kind load docker-image golearn-api:latest --name golearn
+	kind load docker-image golearn-api:latest postgres:17-alpine --name golearn
+
+# ---------- D19 §7 → D18 雏形：build → load → upgrade ----------
+
+# 镜像 tag = 当前提交的短 SHA。⭐ 不用 latest：
+#   ① tag 变 → pod template 变 → Deployment 自动滚动更新（latest 不会）
+#   ② kubectl get pod -o yaml 能回答「线上跑的是哪次提交」
+# 工作区有未提交改动时加 -dirty 后缀，提醒你这个镜像和任何一次提交都对不上。
+GIT_SHA   := $(shell git rev-parse --short HEAD)
+GIT_DIRTY := $(shell git diff --quiet || echo -dirty)
+IMAGE_TAG ?= $(GIT_SHA)$(GIT_DIRTY)
+IMAGE      = golearn-api:$(IMAGE_TAG)
+
+image:
+	docker build -t $(IMAGE) .
+	@echo "已构建 $(IMAGE)"
+
+kind-load-image: image
+	kind load docker-image $(IMAGE) --name golearn
+
+# 一键发布到 kind：build → 塞进节点 → helm upgrade。
+# ⚠️ 只有 --set image.tag 变了 Deployment 才会滚动 —— 这就是为什么 tag 不能是 latest。
+deploy-dev: helm-sync kind-load-image
+	helm upgrade --install $(RELEASE) $(CHART) -f $(CHART)/values-dev.yaml \
+		--set image.tag=$(IMAGE_TAG) --wait --timeout 2m
+	@echo "已发布 $(IMAGE)"
+	@kubectl get pods -l app.kubernetes.io/name=golearn-api \
+		-o custom-columns=POD:.metadata.name,IMAGE:.spec.containers[0].image,READY:.status.containerStatuses[0].ready

@@ -385,7 +385,7 @@ func RateLimit(capacity int, refill time.Duration) Middleware {
 			now := time.Now()
 			// 根据经过的时间补充令牌
 			elapsed := now.Sub(lastRefill)
-			added := float64(elapsed) / float64(refill)
+			added := float64(elapsed) / float64(refill) * float64(capacity)
 			tokens += added
 			if tokens > float64(capacity) {
 				tokens = float64(capacity)
@@ -407,4 +407,27 @@ func RateLimit(capacity int, refill time.Duration) Middleware {
 			w.WriteHeader(http.StatusTooManyRequests)
 		})
 	}
+}
+
+// Unless 让 mw 对 skip 返回 true 的请求不生效，直接放行到 next。
+func Unless(mw Middleware, skip func(*http.Request) bool) Middleware {
+	return func(next http.Handler) http.Handler {
+		wrapped := mw(next) // ⭐ 在这里包一次，不是每个请求包一次
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skip(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			wrapped.ServeHTTP(w, r)
+		})
+	}
+}
+
+// PathIs 是最常用的 skip 条件。
+func PathIs(paths ...string) func(*http.Request) bool {
+	set := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		set[p] = true
+	}
+	return func(r *http.Request) bool { return set[r.URL.Path] }
 }

@@ -16,3 +16,66 @@ TODO(D19)：dev 专用的集群内 Postgres。只在 .Values.postgres.enabled �
   helm template t . | grep -c postgres           # 默认应该是 0
   helm template t . -f values-dev.yaml | grep -c 'kind: '   # 比默认多 2 个
 */}}
+
+{{- if .Values.postgres.enabled }}
+{{- with .Values.postgres }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-postgres" (include "golearn-api.fullname" $) }}
+  labels:
+    {{- include "golearn-api.labels" $ | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $.Chart.Name }}-postgres
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $.Chart.Name }}-postgres
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: {{ .user | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .database | quote }}
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .user | quote }}, "-d", {{ .database | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-postgres" (include "golearn-api.fullname" $) }}
+  labels:
+    {{- include "golearn-api.labels" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app.kubernetes.io/name: {{ $.Chart.Name }}-postgres
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+{{- end }}
+{{- end }}

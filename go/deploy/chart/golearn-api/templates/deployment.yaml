@@ -25,6 +25,7 @@ spec:
           checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         Secret 同理。
         */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       containers:
         - name: api
@@ -39,12 +40,41 @@ spec:
           用 envFrom（整个 ConfigMap/Secret 一次注入），不要一个 key 一个 env 地写。
           Secret 那条要判断 .Values.secrets 有没有内容。
           */}}
+          envFrom:
+            - configMapRef:
+                name: {{ include "golearn-api.fullname" . }}
+            {{- if or .Values.secrets.DATABASE_URL .Values.secrets.API_TOKEN }}
+            - secretRef:
+                name: {{ include "golearn-api.fullname" . }}
+            {{- end }}
           {{/*
           TODO(D19) ③：探针。
             readinessProbe  → GET /healthz（它会 Ping 数据库，D14）
             livenessProbe   → 也是 /healthz？想一想：数据库挂了要不要重启 api Pod？
                               重启能解决问题吗？写下你的选择和理由（小题 B2）。
           */}}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+            timeoutSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: {{ .Values.service.targetPort }}
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+            timeoutSeconds: 1
           {{/*
           TODO(D19) ④：resources —— 用 toYaml + nindent 把 .Values.resources 整块放进来。
           */}}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

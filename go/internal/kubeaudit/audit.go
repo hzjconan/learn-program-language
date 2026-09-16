@@ -22,6 +22,8 @@ package kubeaudit
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,7 +45,10 @@ type Options struct {
 	Namespace string
 	// MaxRestarts 超过这个值才报。
 	MaxRestarts int32
+	PageSize    int32
 }
+
+const defaultPageSize int32 = 500
 
 // rule 是一条规则。⭐ 用函数类型而不是接口 —— 和 D11 §1.7 http.HandlerFunc 同一个理由：
 // 规则没有状态，一个函数就够；要参数（比如阈值）就用闭包捕获。
@@ -55,6 +60,10 @@ type rule func(pod *corev1.Pod) []Finding
 // 讲了什么时候需要）。List 一次拿全量，大集群可能有几万个 Pod，
 // 所以 ListOptions 里用了 Limit 分页 —— TODO(D19)：处理 Continue，把所有页拉完。
 func Audit(ctx context.Context, client kubernetes.Interface, opts Options) ([]Finding, error) {
+	if opts.PageSize == 0 {
+		opts.PageSize = defaultPageSize
+	}
+
 	rules := []rule{
 		checkReady,
 		checkRestarts(opts.MaxRestarts),
@@ -69,8 +78,26 @@ func Audit(ctx context.Context, client kubernetes.Interface, opts Options) ([]Fi
 	//   处理 err；遍历 pods.Items（⚠️ 注意 range 拷贝 —— Pod 是大 struct，用 &pods.Items[i]）
 	//   对每个 pod 跑每条 rule，append 到 findings
 	//   pods.Continue != "" 时带上 Continue 再 List，直到为空
-	_ = metav1.ListOptions{}
-	_ = rules
+
+	continueList := ""
+	for {
+		listopts := metav1.ListOptions{Limit: int64(opts.PageSize), Continue: continueList}
+		pods, err := client.CoreV1().Pods(opts.Namespace).List(ctx, listopts)
+		if err != nil {
+			return nil, fmt.Errorf("list pods in namespace %q (continue=%q): %w", opts.Namespace, continueList, err)
+		}
+
+		for i := range pods.Items {
+			for _, rule := range rules {
+				findings = append(findings, rule(&pods.Items[i])...)
+			}
+		}
+
+		if pods.Continue == "" {
+			break
+		}
+		continueList = pods.Continue
+	}
 
 	return findings, nil
 }
@@ -84,7 +111,57 @@ func Audit(ctx context.Context, client kubernetes.Interface, opts Options) ([]Fi
 // ⚠️ Succeeded 的 Pod（跑完的 Job）不算问题。
 func checkReady(pod *corev1.Pod) []Finding {
 	// TODO(D19)
-	return nil
+	var findings []Finding
+
+	// Succeeded 的 Pod（跑完的 Job）不算问题。
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return findings
+	}
+
+	// Pod 不在 Running 阶段 —— 先报一条 Pod 级 Finding（Container 留空）。
+	// ⚠️ 必须在容器循环之外：调度不上（Unschedulable）、被驱逐（Evicted）的 Pod
+	// 根本没有 ContainerStatuses，挂在循环里就漏报了。
+	if pod.Status.Phase != corev1.PodRunning {
+		msg := fmt.Sprintf("Pod phase is %s", pod.Status.Phase)
+		if pod.Status.Reason != "" {
+			msg = fmt.Sprintf("Pod phase is %s, reason: %s", pod.Status.Phase, pod.Status.Reason)
+		}
+		f := Finding{
+			Namespace: pod.Namespace,
+			Pod:       pod.Name,
+			Rule:      "not-ready",
+			Message:   msg,
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+				f.Container = cs.Name
+				f.Message = fmt.Sprintf("%s, container %s waiting: %s",
+					msg, cs.Name, cs.State.Waiting.Reason)
+				break
+			}
+		}
+		findings = append(findings, f)
+		return findings
+	}
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Ready {
+			continue
+		}
+		f := Finding{
+			Namespace: pod.Namespace,
+			Pod:       pod.Name,
+			Container: cs.Name,
+			Rule:      "not-ready",
+			Message:   fmt.Sprintf("container %s is not ready", cs.Name),
+		}
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			f.Message = fmt.Sprintf("container %s not ready, waiting: %s",
+				cs.Name, cs.State.Waiting.Reason)
+		}
+		findings = append(findings, f)
+	}
+	return findings
 }
 
 // checkRestarts 返回一条规则：任一容器重启超过 maxRestarts 次就报。
@@ -94,7 +171,24 @@ func checkReady(pod *corev1.Pod) []Finding {
 func checkRestarts(maxRestarts int32) rule {
 	return func(pod *corev1.Pod) []Finding {
 		// TODO(D19)
-		return nil
+		var findings []Finding
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.RestartCount > maxRestarts {
+				f := Finding{
+					Namespace: pod.Namespace,
+					Pod:       pod.Name,
+					Container: cs.Name,
+					Rule:      "restarts",
+					Message:   fmt.Sprintf("container %s restarts %d times", cs.Name, cs.RestartCount),
+				}
+				if cs.LastTerminationState.Terminated != nil {
+					f.Message = fmt.Sprintf("container %s restarts %d times, terminated reason: %s",
+						cs.Name, cs.RestartCount, cs.LastTerminationState.Terminated.Reason)
+				}
+				findings = append(findings, f)
+			}
+		}
+		return findings
 	}
 }
 
@@ -104,7 +198,21 @@ func checkRestarts(maxRestarts int32) rule {
 // 用 .Memory() 或 [corev1.ResourceMemory]；零值 Quantity 的 IsZero() 为 true。
 func checkLimits(pod *corev1.Pod) []Finding {
 	// TODO(D19)
-	return nil
+	var findings []Finding
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		mem := c.Resources.Limits[corev1.ResourceMemory]
+		if mem.IsZero() {
+			findings = append(findings, Finding{
+				Namespace: pod.Namespace,
+				Pod:       pod.Name,
+				Container: c.Name,
+				Rule:      "no-limits",
+				Message:   fmt.Sprintf("container %s has no memory limit", c.Name),
+			})
+		}
+	}
+	return findings
 }
 
 // checkLatestTag：镜像没写 tag 或 tag 是 latest。
@@ -113,5 +221,35 @@ func checkLimits(pod *corev1.Pod) []Finding {
 // 别用 strings.Split(image, ":")。想一想哪些情况会误判，写进测试。
 func checkLatestTag(pod *corev1.Pod) []Finding {
 	// TODO(D19)
-	return nil
+	var findings []Finding
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if needsTag(c.Image) {
+			findings = append(findings, Finding{
+				Namespace: pod.Namespace,
+				Pod:       pod.Name,
+				Container: c.Name,
+				Rule:      "latest-tag",
+				Message:   fmt.Sprintf("container %s uses image %s without a pinned tag", c.Name, c.Image),
+			})
+		}
+	}
+	return findings
+}
+
+func needsTag(image string) bool {
+	// ① digest 引用权威，不需要 tag
+	if strings.Contains(image, "@") {
+		return false
+	}
+	// ② tag 只可能在「最后一个 / 之后」
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		// 存在 tag 分隔符 —— 看 tag 本身
+		tag := image[lastColon+1:]
+		return tag == "latest"
+	}
+	// ③ 没有 tag 分隔符 → 无 tag
+	return true
 }

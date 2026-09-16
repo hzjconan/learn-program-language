@@ -36,6 +36,7 @@ func run() int {
 		namespace   = flag.String("n", "", "只看这个 namespace（默认全部）")
 		maxRestarts = flag.Int("max-restarts", 3, "容器重启超过这个次数才报")
 		timeout     = flag.Duration("timeout", 30*time.Second, "整个巡检的超时")
+		ps          = flag.Int("page-size", 500, "分页大小，默认500")
 	)
 	flag.Parse()
 
@@ -58,6 +59,7 @@ func run() int {
 	findings, err := kubeaudit.Audit(ctx, client, kubeaudit.Options{
 		Namespace:   *namespace,
 		MaxRestarts: int32(*maxRestarts), //nolint:gosec // 命令行参数，范围可控
+		PageSize:    int32(*ps),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "巡检失败: %v\n", err)

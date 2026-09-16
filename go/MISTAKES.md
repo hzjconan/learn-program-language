@@ -41,6 +41,8 @@
 | 26 | D14 | 业务规则放进了 handler 中间件 | 换个入口就绕过去了；判据自己会用却没用 |
 | 27 | D14 | `http.Error(w, err.Error(), 500)` | 泄漏内部细节 + 状态码硬编码 |
 | 28 | D15 | `os.Exit` 跳过 `defer`；`log.Fatal` 退的是进程 | 自己写对了，读题时指错了行；第四次 |
+| 29 | D19 | Helm `indent` vs `nindent` | `indent` 让第一行多缩一层，YAML 直接解析失败 |
+| 30 | D19 | 缺失的 value 是什么 | 深度合并：从 values.yaml 拿默认；都没有才是 nil；`required` 两种都拦 |
 
 ---
 
@@ -758,3 +760,66 @@ D21 面试模拟要专门针对这个模式出题：**给一段有已知坑的�
   问「`db.Close()` 会被调用吗？」
 - 问「`t.Fatal` 和 `log.Fatal` 各会让什么退出？各自的 defer 跑不跑？」
 - 反过来问：「一个在子 goroutine 里调 `t.Fatal` 的测试会发生什么？」（QA #20 场景三）
+
+## 29 · D19 Helm `indent` vs `nindent`（小题 A9）
+
+**错误直觉**：以为下面第一段只是「缩进多了空格，难看但语法没错」，
+还以为 `indent` 的问题是「不换行导致下一行接上来」。
+
+```yaml
+resources:
+  {{ toYaml .Values.resources | indent 2 }}      # ❌
+```
+```yaml
+resources:
+  {{- toYaml .Values.resources | nindent 2 }}    # ✅
+```
+
+**实际**（讲义 §6.4 实测）：第一段**直接 YAML 解析失败**。
+`indent 2` 给每一行前面加 2 格，但模板这一行**自己已经有 2 格缩进**，
+于是第一行 4 格、后面各行 2 格，报 `did not find expected key`。
+
+**正确规则**：
+
+| | 做什么 | 第一行 |
+|---|---|---|
+| `indent N` | 每行前加 N 格 | 叠在模板行自己的缩进上 → **多一层** |
+| `nindent N` | **先换行**，再每行前加 N 格 | 和后面的行一致 |
+
+配合左边的 `{{-` 吃掉模板行自己的缩进和换行，`nindent N` 的 N 就是「从第几列开始」的绝对值
+（= 父 key 的列数 + 2），和 `toYaml` 内部固定的 2 格缩进无关。
+
+⭐ **`{{-` + `nindent` 永远成对**；`indent` 只在「行首本来就没缩进」的场合用（几乎没有）。
+
+⚠️ 自己 `deployment.yaml` 里写的就是对的（`{{- toYaml .Values.resources | nindent 12 }}`），
+但说不出 `indent` 为什么错——**知道怎么写，不知道为什么**。
+
+**重测角度**：给一段渲染出错的模板（`indent` 那种），让说出渲染结果长什么样、错在第几行；
+或者反过来给渲染结果「第一行 4 格后面 2 格」，问模板哪里写错了。
+
+## 30 · D19 缺失的 value 渲染成什么（小题 A10）
+
+**错误直觉**：`values-prod.yaml` 里没有 `secrets` 段，就以为模板里 `.Values.secrets.DATABASE_URL`
+拿不到、必须 `--set`。答成了「怎么传」，没答题目问的「值是什么」。
+
+**正确规则**：values 是**按 key 深度合并**的（讲义 §6.5）：
+
+```
+values.yaml            secrets.DATABASE_URL: ""      ← 默认
+values-prod.yaml       （没有 secrets 段）
+合并结果               secrets.DATABASE_URL: ""      ← 空字符串，不是报错也不是 nil
+```
+
+| 情况 | `.Values.secrets.DATABASE_URL` 是 |
+|---|---|
+| `values.yaml` 有默认 `""`，覆盖文件没写 | `""` 空字符串 |
+| 连 `values.yaml` 都没定义 | `nil`，渲染成空，**不报错** |
+| `.Values.secrets` 整个不存在还往下点 `.DATABASE_URL` | nil 上取字段 → 也是 nil（Go 模板对 map 宽容） |
+
+⭐ **Helm 对缺失的 value 默认是沉默的**——渲染出一个空值照样 install。
+`required` 是唯一让它开口的地方，nil 和 `""` 它都当「没给」。
+这也是为什么 `values.yaml` 里要把 `DATABASE_URL: ""` 写出来：**默认值是文档**，
+读的人知道有这个 key、知道它必须由外部提供。
+
+**重测角度**：给 `values.yaml` + 一个覆盖文件 + 一行模板，问渲染出什么（空串 / nil / 报错）；
+再问「加了 `required` 之后呢」「`--set secrets.API_TOKEN=x` 会不会把 DATABASE_URL 也带上」。

@@ -26,3 +26,62 @@ TODO(D19)：数据库迁移 Job —— Helm hook（§6.6），接 D13 §9.2「�
   helm template t . -f values-dev.yaml --show-only templates/migrate-job.yaml
   helm install ... 之后 kubectl get jobs / kubectl logs job/...
 */}}
+{{- if .Values.migration.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-migration" (include "golearn-api.fullname" .) }}
+  annotations:
+    {{/* hook 类型：install 和 upgrade 都跑 —— 每次部署都先迁移 */}}
+    "helm.sh/hook": post-install,pre-upgrade
+    {{/* hook 权重：同一阶段多个 hook 按 weight 排序，0 默认值，这里用-5 因为configMap的创建应该要早Job的创建 */}}
+    "helm.sh/hook-weight": "-5"
+    {{/* 清理策略：之前残留的先删（before-hook-creation），成功后自动删（hook-succeeded）
+         失败的 Job 留着方便排查 */}}
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  001_orders.sql: |
+{{ .Files.Get "files/migrations/001_orders.sql" | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate" (include "golearn-api.fullname" .) }}
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          {{/* 从 Secret 注入 DATABASE_URL —— psql 不认这个 env，要用命令行传参 */}}
+          envFrom:
+            - secretRef:
+                name: {{ include "golearn-api.fullname" . }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Waiting for database..."
+              until pg_isready -d "$DATABASE_URL"; do
+                echo "  not ready, retry in 2s"
+                sleep 2
+              done
+              echo "Applying migrations..."
+              psql "$DATABASE_URL" -f /migrations/001_orders.sql
+              echo "Migrations done."
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ printf "%s-migration" (include "golearn-api.fullname" .) }}
+{{- end }}
