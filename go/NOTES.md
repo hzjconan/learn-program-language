@@ -26,6 +26,7 @@
 | [D14](notes/D14.md) | 周综合项目：REST API 服务 | 09-06 |
 | [D15](notes/D15.md) | 测试进阶 | 09-12 |
 | [D19](notes/D19.md) | 云原生基础：控制循环、client-go、Helm | 09-13 → 09-16 |
+| [D20](notes/D20.md) | 写一个 Operator | 09-16 → 09-28 |
 
 执行顺序按 [LEARNING-PLAN §0'](LEARNING-PLAN.md)：D15 → D19 → D20 → D16 → D17 → D18 → D21。
 

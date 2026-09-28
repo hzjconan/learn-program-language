@@ -31,6 +31,15 @@ spec:
         - name: api
           image: {{ include "golearn-api.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{/*
+          ports 是【声明】，不控制网络（D20 问答）：
+            - K8s 不做端口映射（和 docker -p 不同），进程监听什么端口就是什么端口，不写也能访问
+            - Pod 里所有容器共用一个网络命名空间：同一个 IP、同一套端口，两个容器监听同一端口会 bind 失败
+            - 写它是为了：① 给端口起名，Service 的 targetPort / 探针的 port 可以按名引用（service.yaml 就是 targetPort: http）
+                         ② kubectl describe 能看到  ③ Prometheus ServiceMonitor 这类工具按端口名发现
+            - 唯一真的影响网络的是 hostPort，日常不用
+          protocol: TCP 是默认值，显式写是让它和服务端填的一致，避免 diff。
+          */}}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

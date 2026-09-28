@@ -380,5 +380,5 @@ kind delete cluster --name golearn   # 收工
 - [ ] D17 性能与内存
 - [ ] D18 构建与交付
 - [x] D19 云原生基础
-- [ ] D20 Operator 实战
+- [x] D20 Operator 实战
 - [ ] D21 收尾、面试模拟与路线规划

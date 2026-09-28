@@ -1,0 +1,26 @@
+# 用 WebApp 部署 D14 的 golearn-api（D20 §7 ③）。
+#
+#   kubectl apply -k config/samples/
+#   kubectl get wa                       # shortName
+#   kubectl get deploy,svc -l app.kubernetes.io/managed-by=golearn-operator
+#
+# 数据库复用 D19 Helm 装的那个 dev Postgres（Service 名 golearn-golearn-api-postgres），
+# 所以要先 helm ls 确认 golearn release 在。
+apiVersion: apps.golearn.dev/v1alpha1
+kind: WebApp
+metadata:
+  labels:
+    app.kubernetes.io/name: golearn-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: golearn-api
+spec:
+  # ⚠️ 这个 tag 要和 kind 节点里有的一致（docker exec golearn-control-plane crictl images | grep golearn-api）
+  image: golearn-api:e8c4b99-dirty
+  replicas: 2
+  port: 8080
+  healthPath: /healthz
+  # TODO(D20) ①：Env 字段加完之前，下面这段会被 CRD 校验拒掉（unknown field）—— 这是 CRD schema 在工作。
+  env:
+    DATABASE_URL: postgres://devuser:devpass@golearn-golearn-api-postgres:5432/golearn?sslmode=disable
+    LOG_FORMAT: json
+    RATE_LIMIT: "600"

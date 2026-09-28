@@ -1,0 +1,176 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: webapps.apps.golearn.dev
+spec:
+  group: apps.golearn.dev
+  names:
+    kind: WebApp
+    listKind: WebAppList
+    plural: webapps
+    shortNames:
+    - wa
+    singular: webapp
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .spec.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Available")].status
+      name: Available
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: WebApp is the Schema for the webapps API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of WebApp
+            properties:
+              env:
+                additionalProperties:
+                  type: string
+                description: |-
+                  注入成容器的环境变量 —— golearn-api 需要 DATABASE_URL 才能起来。
+                  加完跑 `make generate manifests`，然后看 config/crd/bases/ 里的 yaml 多了什么。
+                type: object
+              healthPath:
+                default: /healthz
+                description: healthPath 是 readiness 探针的路径。
+                type: string
+              image:
+                description: image 是容器镜像，含 tag。⚠️ 别用 latest（D19 §7 讨论过为什么）。
+                minLength: 1
+                type: string
+              port:
+                default: 8080
+                description: port 是容器监听的端口，Service 也用它。
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              replicas:
+                default: 1
+                description: replicas 是期望副本数。指针是为了区分「没写」和「写了 0」（D12 §1.2 那条）。
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - image
+            type: object
+          status:
+            description: status defines the observed state of WebApp
+            properties:
+              conditions:
+                description: |-
+                  conditions 是标准的状态条件列表。本课只用一个：
+                    Available  True  = readyReplicas == spec.replicas
+                               False = 还没到 / 出错了（Reason 里说为什么）
+                  用 meta.SetStatusCondition 维护，别手写 append（它会处理去重和 LastTransitionTime）。
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration 是 controller 最后处理过的 metadata.generation。
+                  ⭐ 用户每改一次 spec，generation +1；status 里记下你看到的那个，
+                  读 status 的人就能判断「这个 status 是不是针对当前 spec 的」。
+                format: int64
+                type: integer
+              readyReplicas:
+                description: readyReplicas 从 Deployment.Status.ReadyReplicas 抄过来。
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

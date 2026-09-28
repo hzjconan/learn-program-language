@@ -43,6 +43,7 @@
 | 28 | D15 | `os.Exit` 跳过 `defer`；`log.Fatal` 退的是进程 | 自己写对了，读题时指错了行；第四次 |
 | 29 | D19 | Helm `indent` vs `nindent` | `indent` 让第一行多缩一层，YAML 直接解析失败 |
 | 30 | D19 | 缺失的 value 是什么 | 深度合并：从 values.yaml 拿默认；都没有才是 nil；`required` 两种都拦 |
+| 31 | D20 | `range` map 生成 desired | 顺序随机 → 每次「变了」→ Deployment 无限滚动重启；自己写对了却认不出 |
 
 ---
 
@@ -823,3 +824,48 @@ values-prod.yaml       （没有 secrets 段）
 
 **重测角度**：给 `values.yaml` + 一个覆盖文件 + 一行模板，问渲染出什么（空串 / nil / 报错）；
 再问「加了 `required` 之后呢」「`--set secrets.API_TOKEN=x` 会不会把 DATABASE_URL 也带上」。
+
+## 31 · D20 用 `range` map 生成 desired 状态（小题 A8，答「不知道」）
+
+**题目**：`desiredDeployment` 里用 `for k, v := range app.Spec.Env` 生成容器的 env 列表，
+`TestReconcile_IsIdempotent` 会怎样？和 D3 哪一条有关？
+
+**当时的答案**：不知道。
+
+**正确规则**：**Go 里 map 的遍历顺序是随机的**（运行时故意打乱，防止代码依赖顺序 —— D3）。
+后果一路放大：
+
+```
+每次 reconcile 算出的 env 顺序不同
+  → CreateOrUpdate 比较后认为【内容真的变了】
+    → API server 真的写入，metadata.generation +1
+      → Deployment 认为 pod template 变了 → 【滚动重启所有 Pod】
+        → Deployment.status 变 → Owns 事件 → 入队 → 再 reconcile → 再滚动 …
+```
+
+⚠️ 这和「整个覆盖 `deploy.Spec`」是**两种不同**的问题，别混：
+
+| | 现象 | 严重程度 |
+|---|---|---|
+| 整个覆盖 Spec | 客户端每次都发 PUT，但内容和服务端一致 → **API server no-op** | 日志/指标失真（`updated` 满屏） |
+| **desired 不确定**（map 顺序、`time.Now()`、随机数） | 内容**真的**不同 → 真的写 → generation +1 | **线上服务无限滚动重启** ⚠️ |
+
+⭐ 规则：**reconcile 每次必须算出字节级完全相同的 desired。**
+map 要排序（`slices.Sorted(maps.Keys(m))`）、不用 `time.Now()`、不用随机数、
+不依赖 `for range` 一个 map/set 的顺序。
+
+⭐ **注意这条又和代码水平脱节，而且是第五次**：自己的 `envVars` 写的就是
+`keys := slices.Sorted(maps.Keys(env))`（对的），但**说不出为什么必须排序**。
+和 [#22](#22--d12-类型断言穿不透-w-包装小题-a6)、
+[#23](#23--d13-循环读完没报错不等于读全了小题-a3)、
+[#27](#27--d14-httperrorw-errerror-500-的两个问题小题-a4)、
+[#28](#28--d15-osexit-跳过-deferlogfatal-退的是进程不是-goroutine小题-a5) 同一个模式：
+**写代码时的正确是「照着惯例做」，读代码时的失败说明规则没真正内化。**
+
+D21 面试模拟对这个模式要专门出题：**给一段有已知坑的代码让找问题**，而不是问「应该怎么写」。
+
+**重测角度**：
+- 给一个 reconcile 片段（env 用 range map / labels 里有 `time.Now().Unix()`），
+  问「部署上线后会观察到什么现象」——要能答到「Pod 反复重启」而不只是「测试会红」。
+- 反过来：「怎么判断一个 reconcile 是不是幂等」——要答到「同一输入算两次，结果字节相同」。
+- 顺带考 D3：「`for k := range m` 两次的顺序一样吗？Go 为什么这么设计？」
