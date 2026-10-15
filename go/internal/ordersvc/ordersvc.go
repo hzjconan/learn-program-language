@@ -24,6 +24,11 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/hzjconan/learn-program-language/go/internal/apperr"
 	"github.com/hzjconan/learn-program-language/go/internal/orders"
 )
@@ -117,7 +122,18 @@ func New(repo Repository) *Service { return &Service{repo: repo} }
 //
 // ⚠️ 别在这里检查「Status 是不是 pending」：新订单的状态由数据库默认值决定，
 // 调用方压根不该传。
-func (s *Service) Place(ctx context.Context, o *orders.Order) error {
+func (s *Service) Place(ctx context.Context, o *orders.Order) (err error) {
+	ctx, span := otel.Tracer("ordersvc").Start(ctx, "ordersvc.Place")
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetAttributes(attribute.Int64("order.id", o.ID))
+		}
+		span.End()
+	}()
+
 	if strings.TrimSpace(o.Customer) == "" {
 		return apperr.Invalid("Customer信息为空", nil)
 	}
@@ -185,7 +201,16 @@ func (s *Service) List(ctx context.Context, f orders.ListFilter) ([]orders.Order
 // Pay 支付订单。
 //
 // TODO(D14)：实现我。见 canTransition 的说明。
-func (s *Service) Pay(ctx context.Context, id int64) error {
+func (s *Service) Pay(ctx context.Context, id int64) (err error) {
+	ctx, span := otel.Tracer("ordersvc").Start(ctx, "ordersvc.Pay", trace.WithAttributes(attribute.Int64("order.id", id)))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	o, err := s.Get(ctx, id)
 	if err != nil {
 		return err

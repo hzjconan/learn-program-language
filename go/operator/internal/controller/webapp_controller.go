@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +48,8 @@ import (
 	appsv1alpha1 "github.com/hzjconan/learn-program-language/go/operator/api/v1alpha1"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // WebAppReconciler reconciles a WebApp object
@@ -54,6 +57,14 @@ type WebAppReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+// containerName 是 WebApp 管理的那个容器的名字。desiredDeployment 和 mutateFn 必须一致。
+const containerName = "app"
+
+// conflictRequeueDelay：冲突后多久兜底重试一次。
+// 正常冲突是别的 writer 刚改过对象，那次写入的事件会自动把 key 放回队列，所以这里只是兜底，长一点不影响恢复速度。
+// RequeueAfter 绕过限速器的指数退避；如果冲突持续发生（两个 controller 争同一个字段），延迟越短循环越快。
+const conflictRequeueDelay = 3 * time.Second
 
 // RBAC marker：controller-gen 从这些注释生成 config/rbac/role.yaml。
 // ⚠️ 你的 controller 要碰 Deployment 和 Service，就必须在这里声明 ——
@@ -102,12 +113,27 @@ type WebAppReconciler struct {
 // ⚠️ 幂等自检（D19 §2.3 ①）：同一个 spec 连跑两次 Reconcile，第二次不该有任何写操作。
 // 测试里有一条专门验这个（TestReconcile_IsIdempotent）。
 func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	err := r.reconcile(ctx, req)
+	if apierrors.IsConflict(err) {
+		// 预期内：别的 writer 刚改过这个对象，我们读到的缓存版本过时了。
+		// 不当成错误（不刷 ERROR、不计入 result="error"），稍后重试。
+		logf.FromContext(ctx).V(1).Info("conflict, requeueing", "err", err)
+		return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
+	}
+	return ctrl.Result{}, err
+}
+
+func (r *WebAppReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
 	log := logf.FromContext(ctx)
 
 	// TODO(D20) ②
 	var app appsv1alpha1.WebApp
 	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err) // NotFound → nil；其它 → err 重试
+		if apierrors.IsNotFound(err) {
+			// WebApp 已删除：子资源由 GC 处理，但 operator 进程里的指标要自己清（否则成了僵尸序列）
+			readyReplicas.DeleteLabelValues(req.Namespace, req.Name)
+		}
+		return client.IgnoreNotFound(err) // NotFound → nil；其它 → err 重试
 	}
 
 	desiredD := desiredDeployment(&app)
@@ -122,12 +148,32 @@ func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if deploy.CreationTimestamp.IsZero() { // ⚠️ Selector 只在创建时设，之后不可变
 			deploy.Spec.Selector = desiredD.Spec.Selector
 		}
-		deploy.Spec.Template = desiredD.Spec.Template
+		// 只设置自己管的字段，其它字段保留集群里的值（包括 API server 补的默认值）。
+		// 整个覆盖 Template 的话，每次比较都「不一样」→ 每次都发 Update → 每次都报 updated
+		tmpl := &deploy.Spec.Template
+		tmpl.Labels = desiredD.Spec.Template.Labels
+		if len(tmpl.Spec.Containers) != 1 || tmpl.Spec.Containers[0].Name != containerName {
+			tmpl.Spec.Containers = []corev1.Container{{Name: containerName}}
+		}
+		c, want := &tmpl.Spec.Containers[0], &desiredD.Spec.Template.Spec.Containers[0]
+		c.Image, c.Ports, c.Env = want.Image, want.Ports, want.Env // 探针从这一行里拿出来
+
+		if c.ReadinessProbe == nil { // 探针可能还不存在
+			c.ReadinessProbe = &corev1.Probe{}
+		}
+		p := c.ReadinessProbe
+		p.Exec, p.TCPSocket, p.GRPC = nil, nil, nil // 清掉其它类型的探针
+		if p.HTTPGet == nil {                       // HTTPGet 也可能还不存在
+			p.HTTPGet = &corev1.HTTPGetAction{}
+		}
+		p.HTTPGet.Path = want.ReadinessProbe.HTTPGet.Path // 只设置这两个字段
+		p.HTTPGet.Port = want.ReadinessProbe.HTTPGet.Port
 		return controllerutil.SetControllerReference(&app, deploy, r.Scheme)
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensure deployment: %w", err)
+		return fmt.Errorf("ensure deployment: %w", err)
 	}
+	childOpsTotal.WithLabelValues("Deployment", string(op)).Inc()
 	log.Info("deployment reconciled", "op", op)
 
 	// service
@@ -142,19 +188,23 @@ func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return controllerutil.SetControllerReference(&app, service, r.Scheme)
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensure service: %w", err)
+		return fmt.Errorf("ensure service: %w", err)
 	}
+	childOpsTotal.WithLabelValues("Service", string(op)).Inc()
 	log.Info("service reconciled", "op", op)
 
+	ready := deploy.Status.ReadyReplicas
+
 	// 更新状态
+	statusChanged := app.Status.ObservedGeneration != app.Generation ||
+		app.Status.ReadyReplicas != ready
 	app.Status.ObservedGeneration = app.Generation
-	app.Status.ReadyReplicas = deploy.Status.ReadyReplicas
+	app.Status.ReadyReplicas = ready
 
 	want := int32(1)
 	if app.Spec.Replicas != nil {
 		want = *app.Spec.Replicas
 	}
-	ready := deploy.Status.ReadyReplicas
 
 	cond := metav1.Condition{Type: appsv1alpha1.ConditionAvailable}
 	switch ready {
@@ -165,15 +215,22 @@ func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		cond.Status, cond.Reason = metav1.ConditionFalse, "ReplicasNotReady"
 		cond.Message = fmt.Sprintf("%d/%d replicas ready", ready, want)
 	}
-	meta.SetStatusCondition(&app.Status.Conditions, cond)
-	err = r.Status().Update(ctx, &app)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
+	if meta.SetStatusCondition(&app.Status.Conditions, cond) {
+		statusChanged = true
+	}
+	if statusChanged {
+		err = r.Status().Update(ctx, &app)
+		if err != nil {
+			return fmt.Errorf("update status: %w", err)
+		}
+		statusUpdatesTotal.Inc()
+		log.Info("status updated")
 	}
 
-	log.Info("status updated")
+	// gauge 回答的是「此刻是多少」，每次 reconcile 都应该报告最新的值，不放在if statusChanged里面
+	readyReplicas.WithLabelValues(app.Namespace, app.Name).Set(float64(ready))
 
-	return ctrl.Result{}, nil
+	return nil
 
 }
 
@@ -200,7 +257,7 @@ func desiredDeployment(app *appsv1alpha1.WebApp) *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					// TODO(D20) ③
 					Containers: []corev1.Container{{
-						Name:  "app",
+						Name:  containerName,
 						Image: app.Spec.Image,
 						Ports: []corev1.ContainerPort{{
 							Name:          "http",

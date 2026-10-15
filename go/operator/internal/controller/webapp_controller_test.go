@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,18 +27,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	appsv1alpha1 "github.com/hzjconan/learn-program-language/go/operator/api/v1alpha1"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 var defaultNS = "default"
 
 var healthPath = "/healthz"
+
+const newImage = "golearn-api:v2"
 
 // ⭐ 测试策略：【直接调 Reconcile】，不起 Manager。
 //
@@ -239,7 +250,7 @@ func TestReconcile_UpdatesOnSpecChange(t *testing.T) {
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(app), app); err != nil {
 		t.Fatalf("重新 Get WebApp: %v", err)
 	}
-	app.Spec.Image = "golearn-api:v2"
+	app.Spec.Image = newImage
 	if err := k8sClient.Update(ctx, app); err != nil {
 		t.Fatalf("改 WebApp.Spec: %v", err)
 	}
@@ -248,8 +259,8 @@ func TestReconcile_UpdatesOnSpecChange(t *testing.T) {
 
 	// 子资源应该跟着 spec 变
 	got := getDeployment(t, app).Spec.Template.Spec.Containers[0].Image
-	if got != "golearn-api:v2" {
-		t.Errorf("容器镜像 = %q, want golearn-api:v2\n（⚠️ spec 变了，Reconcile 应该同步到 Deployment）", got)
+	if got != newImage {
+		t.Errorf("容器镜像 = %q, want %s\n（⚠️ spec 变了，Reconcile 应该同步到 Deployment）", newImage, got)
 	}
 }
 
@@ -399,5 +410,134 @@ func TestDesiredDeployment(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---------- 下面的 TODO(D16) ② 自己写 ----------
+
+// TestMetrics_IdempotentReconcileIsVisible
+//
+//	建 → reconcile → 记下 child_ops_total{kind="Deployment",op="unchanged"} 和 status_updates_total
+//	→ 再 reconcile 一次 → 断言：
+//	  - unchanged 那一格 +1（第二趟没写 Deployment —— D20 的幂等，现在【在线上】也看得见了）
+//	  - status_updates_total 【没变】（第二趟 status 没有变化，就不该写 —— D20 小题 B3）
+//	⭐ 读 counter 当前值：testutil.ToFloat64(c.WithLabelValues(...))
+//	  （"github.com/prometheus/client_golang/prometheus/testutil"）
+//	⚠️ counter 是包级变量，所有测试共用、只增不减 —— 断言【差值】，别断言绝对值。
+//	⚠️ 第二条断言在你修 B3 之前是红的。先让它红一次，再去改 Reconcile。
+func TestMetrics_IdempotentReconcileIsVisible(t *testing.T) {
+	app := newWebApp(t)
+
+	// 第一次 reconcile：Deployment 和 Service 刚建，OperationResult = created
+	reconcile(t, app)
+
+	// 记下差值前的快照 —— 所有计数都是包级共享，必须断言差值
+	depUnchangedBefore := testutil.ToFloat64(childOpsTotal.WithLabelValues("Deployment", "unchanged"))
+	statusUpdatesBefore := testutil.ToFloat64(statusUpdatesTotal)
+
+	// 第二次 reconcile：spec 没变 → Service 应该是 unchanged
+	reconcile(t, app)
+
+	depUnchangedAfter := testutil.ToFloat64(childOpsTotal.WithLabelValues("Deployment", "unchanged"))
+	statusUpdatesAfter := testutil.ToFloat64(statusUpdatesTotal)
+
+	if depUnchangedAfter-depUnchangedBefore != 1 {
+		t.Errorf("第二次 reconcile 后 Deployment unchanged 差 = %v, want 1。Deployment 报 updated：mutateFn 是不是整个覆盖了 Spec.Template？集群里那份已被补了默认值",
+			depUnchangedAfter-depUnchangedBefore)
+	}
+
+	if statusUpdatesAfter-statusUpdatesBefore != 0 {
+		t.Errorf("第二次 reconcile 后 status_updates_total 差 = %v, want 0\n"+
+			"（⚠️ 这就是 D20 小题 B3：status 内容没变化就不该写 —— 现在每次 reconcile 都 Inc，去 Reconcile 里加条件判断）",
+			statusUpdatesAfter-statusUpdatesBefore)
+	}
+}
+
+func TestReconcile_ConflictIsRequeuedNotError(t *testing.T) {
+	app := newWebApp(t)
+	reconcile(t, app) // 先用正常的 client 把 Deployment 建出来
+
+	// 制造一个真实的变化：不然第二次 reconcile 时 Deployment 是 unchanged，
+	// CreateOrUpdate 根本不会调用 Update，拦截器拦不到任何东西
+	ctx := testCtx(t)
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(app), app); err != nil {
+		t.Fatalf("重新 Get WebApp: %v", err)
+	}
+	app.Spec.Image = newImage
+	if err := k8sClient.Update(ctx, app); err != nil {
+		t.Fatalf("改 WebApp.Spec: %v", err)
+	}
+
+	// 会撒谎的 client：所有 Update 都返回 409
+	wc, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+	if err != nil {
+		t.Fatalf("建 client: %v", err)
+	}
+	updates := 0
+	c := interceptor.NewClient(wc, interceptor.Funcs{
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			return apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"},
+				obj.GetName(), errors.New("simulated conflict"))
+		},
+	})
+	r := &WebAppReconciler{Client: c, Scheme: scheme.Scheme}
+
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(app)})
+
+	// ⭐ 先确认真的走到了要测的路径
+	if updates == 0 {
+		t.Fatal("拦截器没被调用：Reconcile 没走到 Update，这个测试什么都没测到")
+	}
+	if err != nil {
+		t.Errorf("Reconcile err = %v, want nil（409 是预期内的冲突，不该当错误返回）", err)
+	}
+	if res.RequeueAfter <= 0 {
+		t.Errorf("RequeueAfter = %v, want > 0（冲突后要稍后重试）", res.RequeueAfter)
+	}
+}
+
+func TestMetrics_ReadyReplicasGauge(t *testing.T) {
+	app := newWebApp(t)
+
+	// 第一次 reconcile：Deployment 刚建，ReadyReplicas 还是 0
+	reconcile(t, app)
+
+	ctx := testCtx(t)
+
+	// 手动把 Deployment.Status 填上
+	d := getDeployment(t, app)
+	d.Status.Replicas = 2
+	d.Status.ReadyReplicas = 2
+	if err := k8sClient.Status().Update(ctx, d); err != nil {
+		t.Fatalf("改 Deployment status: %v", err)
+	}
+
+	reconcile(t, app)
+
+	if testutil.ToFloat64(readyReplicas.WithLabelValues(app.Namespace, app.Name)) != 2 {
+		t.Errorf("WebApp创建后，replicas ready_replicas{namespace=%q,name=%q} = %v, want 2", app.Namespace, app.Name, testutil.ToFloat64(readyReplicas.WithLabelValues(app.Namespace, app.Name)))
+	}
+
+	// 判断golearn_webapp_ready_replicas这个metrics被注册到metrics.Registry
+	n, err := testutil.GatherAndCount(metrics.Registry, "golearn_webapp_ready_replicas")
+	if err != nil {
+		t.Fatalf("从 metrics.Registry 收集指标失败: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("golearn_webapp_ready_replicas 不在 metrics.Registry 里（init() 里忘了 MustRegister？）")
+	}
+
+	if err := k8sClient.Delete(ctx, app); err != nil {
+		t.Fatalf("删 WebApp: %v", err)
+	}
+
+	reconcile(t, app)
+
+	// reconcile 在 NotFound 时应该已经删掉了这条序列。
+	// 再删一次：返回 true 说明它刚才还在 → reconcile 没删 → 僵尸序列。
+	if readyReplicas.DeleteLabelValues(app.Namespace, app.Name) {
+		t.Errorf("WebApp 删除后，ready_replicas{namespace=%q,name=%q} 序列还在（僵尸序列）\n"+
+			"（NotFound 路径上要 DeleteLabelValues）", app.Namespace, app.Name)
 	}
 }

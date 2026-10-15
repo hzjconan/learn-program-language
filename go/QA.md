@@ -29,6 +29,11 @@
 | [18](#18-包装-sloghandler-为什么会丢字段) | 包装 `slog.Handler` 为什么会丢字段 | 标准库 |
 | [19](#19-非导出类型上的大写方法算导出吗) | 非导出类型上的大写方法，算导出吗 | 工程 |
 | [20](#20-recover-为什么救不了子-goroutine-里的-panic) | `recover` 为什么救不了子 goroutine 里的 panic | 并发 |
+| [21](#21-性能指标里的-p99-是什么意思) | 性能指标里的 P99 是什么意思 | 可观测性 |
+| [22](#22-pprof-要单独起一个-server-吗它跑不跑业务代码) | pprof 要单独起一个 server 吗？它跑不跑业务代码 | 可观测性 |
+| [23](#23-pprof-是-go-原生支持的吗) | pprof 是 Go 原生支持的吗 | 可观测性 |
+| [24](#24-生产环境-pprof-都是常开的吗它会不会把进程搞垮) | 生产环境 pprof 都是常开的吗？它会不会把进程搞垮 | 可观测性 |
+| [25](#25-多个-controller-都-watch-同一种资源informer-会收到什么) | 多个 controller 都 watch 同一种资源，informer 会收到什么 | K8s |
 
 ---
 
@@ -1354,3 +1359,372 @@ go func() { t.Fatal("boom") }()   // ⚠️ 错的
 并发测试里都有 goroutine，值得回头检查。
 
 （相关：D2 §6 panic/recover、D8 goroutine、D11 §3 Recover 中间件、D15 §3）
+
+---
+
+## 21. 性能指标里的 P99 是什么意思
+
+**一句话**：把一段时间里所有请求的耗时从小到大排好，**排在第 99% 位置的那个值**。
+⭐ 意思是「99% 的请求不超过它，最慢的 1% 超过它」。P50 就是中位数，P95、P999 同理。
+
+### 你已经实现过它（D7）
+
+`internal/logx/report.go` 的 `Percentile(p)` 用的是最近秩法，`Percentile(0.99)` 就是 P99：
+
+```go
+slices.Sort(l)
+idx := int(math.Ceil(p*float64(n))) - 1   // p=0.99, n=1000 → 第 990 个
+return l[idx]
+```
+
+### 为什么不看平均值
+
+100 个请求：98 个 10ms，2 个 3s。
+
+| 统计量 | 值 | 给人的印象 |
+|---|---|---|
+| 平均值 | 约 70ms | 「挺快的」 |
+| P50 | 10ms | 「大多数人很快」 |
+| **P99** | **3s** | 「每 100 个用户里就有 1 个要等 3 秒」 |
+
+平均值把少数很慢的请求摊薄了。P99 让**尾部延迟**露出来，而抱怨的恰恰是这部分用户。
+
+⭐ **一个请求要调很多下游的时候，尾部会被放大**。一个页面并行调用 100 个后端，每个后端只有 1% 的概率慢：
+
+```
+这个页面至少碰上一次慢请求的概率 = 1 - 0.99^100 ≈ 63%
+```
+
+所以 SLO 一般写成「P99 < 200ms」，很少用平均值。
+
+### ⚠️ Prometheus 里的 P99 是估算出来的
+
+D7 的写法要**保存所有数据**再排序，得到的是精确值。Prometheus 只存 histogram 每个桶里的计数：
+
+```
+耗时 ≤ 5ms   的有 800 个
+耗时 ≤ 10ms  的有 950 个
+耗时 ≤ 25ms  的有 995 个   ← 第 990 个落在这个桶里
+耗时 ≤ 50ms  的有 1000 个
+```
+
+`histogram_quantile(0.99, sum by (le) (rate(x_bucket[5m])))` 先找出第 990 个请求落在 10–25ms 这个桶，
+再在桶内**线性插值**，估算出约 23.3ms。
+
+| | 精确计算（D7） | histogram 估算（Prometheus） |
+|---|---|---|
+| 要存什么 | 所有样本 | 每个桶一个计数 |
+| 精度 | 精确 | ⚠️ 取决于桶的边界。桶是 1s、5s 这么粗的话，只能知道「在 1 到 5 秒之间」 |
+| 多实例能不能合并 | ❌ 3 个 Pod 各自的 P99 合不成整体 P99（分位数不能相加） | ✅ 桶计数可以相加，加完再算 |
+
+⚠️ 还要注意 P99 统计的**范围**是什么。比如 `controller_runtime_reconcile_time_seconds` 只统计 reconcile 本身的耗时，
+key 在 workqueue 里排队的时间不算在内。所以它的 P99 很好看，用户仍然可能要等好几分钟（D16 小题 A2）。
+
+### 追问：目标是 3 秒，P99 是 4 秒，能说「接近目标」吗？
+
+**不能。** P99 是分布上的**一个点**。它只说明「至少 99% ≤ 4s，最慢的 1% ≥ 4s」，
+**完全没说这 99% 离 3 秒有多远。**
+
+1000 个请求，P99 取排序后的第 990 个：
+
+| | 分布 A | 分布 B |
+|---|---|---|
+| 请求耗时 | 989 个 3.1s，11 个 4s | 980 个 50ms，20 个 4s |
+| P99 | **4s** | **4s** |
+| P50 | 3.1s | 50ms |
+| **≤ 3 秒的比例** | **0%**，几乎全部没达标 | **98%**，只是尾部慢 |
+
+P99 相同，处境相反：A 需要**整体优化**（每次都要走的慢调用），B 需要**查尾部**（GC 停顿、锁竞争、偶发慢查询）。
+
+细节：**正好** 99% 是 3.1s 的话，第 990 个是 3.1s，P99 = 3.1。慢请求只要稍多于 1%，P99 就跳到 4。分位数在边界附近会跳变。
+
+⚠️ 反方向也一样：最慢那 1% 是 4 秒还是 60 秒，P99 都是 4。要看那部分，用 P999 或最大值。
+
+#### ① 先把目标写成 SLO
+
+「响应时间小于 3 秒」不完整。规范写法要有三个要素，阈值、比例、窗口：
+
+> **过去 28 天内，99% 的请求在 3 秒内完成。**
+
+#### ② ⭐ 直接算达标比例，不去估 P99
+
+SLO 问的是「**多少比例的请求 ≤ 3 秒**」，这和「P99 是多少」不是一个问题。直接用桶算：
+
+```promql
+sum(rate(http_request_duration_seconds_bucket{le="3"}[5m]))
+/
+sum(rate(http_request_duration_seconds_count[5m]))
+```
+
+分布 A 得 0，B 得 0.98，一眼就能区分。
+这个比例**不需要插值，是精确的**，但前提是 **3 必须是桶的边界**。默认桶是 `…, 1, 2.5, 5, 10`，没有 3：
+
+```go
+Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 10},   // 3 = SLO 阈值
+```
+
+用默认桶时，「P99 = 4」只说明它落在 (2.5, 5] 这个桶里，4 这个数是插值出来的，本身就不精确。
+
+#### ③ 看形状，不看单点
+
+同时看 P50、P90、P99、P999：
+- 几条线挨得近、一起偏高：整体慢，像分布 A
+- P50 低、P99 高出一大截：长尾，像分布 B
+
+Grafana 用 histogram 画的热力图能直接看到整个分布。
+
+⭐ **一句话：分位数回答「第 X% 的请求有多慢」，SLO 问的是「多少比例达标」。后者要直接算比例。**
+
+（相关：D7 `Percentile`、D16 §2.2 histogram vs summary、§3 四个黄金信号）
+
+---
+
+## 22. pprof 要单独起一个 server 吗？它跑不跑业务代码
+
+**一句话**：不是另起一个进程，是**同一个进程里开两个监听端口**，两个 `http.Server` 各用自己的 mux。
+业务 mux 只挂业务路由，管理 mux 只挂 pprof。两者共享同一个 Go runtime，所以 pprof 采到的是**整个进程**的数据，业务代码全在里面。
+
+```
+                    ┌─────────────── leakdemo 进程（一个 Go runtime）───────────────┐
+ 用户请求 ─────────► │ :8095  http.Server ──► 业务 mux: /quote /ingest /healthz      │
+                    │                              │                               │
+                    │                              ▼                               │
+                    │                     业务 goroutine、堆上的对象                 │
+                    │                              ▲                               │
+                    │                              │ runtime 直接读取               │
+ 你（本机 curl）───► │ localhost:6060 http.Server ──► 管理 mux: /debug/pprof/*        │
+                    └──────────────────────────────────────────────────────────────┘
+```
+
+### 为什么在另一个端口上也能看到业务代码
+
+pprof 的 handler 不处理业务，它被请求时是**向 runtime 要数据**：
+
+- `goroutine`：`pprof.Lookup("goroutine")`，返回进程里**所有** goroutine 的栈，不管是哪个 server 起的
+- `heap`：runtime 一直在记录的分配采样
+- `profile?seconds=30`：让 runtime 对**整个进程**做 30 秒 CPU 采样
+
+请求从哪个端口进来无所谓，问的都是同一个 runtime。
+D16 靶场就是例子（Claude 备课时实测）：请求发到 `:6060`，看到的 717 个泄漏 goroutine 全是 `:8095` 的业务请求留下的。
+
+### 代码就是两个 `http.Server`（`cmd/leakdemo/main.go` 的 `run()`）
+
+```go
+app := &http.Server{
+    Addr:    ":8095",
+    Handler: newServer(logger).routes(),   // 业务 mux
+}
+admin := &http.Server{
+    Addr:    "localhost:6060",              // ⚠️ 只监听本机
+    Handler: adminMux(),                    // 只有 /debug/pprof/* 五个 handler
+}
+// 各起一个 goroutine ListenAndServe，等信号后一起 Shutdown
+```
+
+### 为什么要分开：访问范围不同
+
+| | 业务端口 | 管理端口 |
+|---|---|---|
+| 谁访问 | 用户、上游服务、负载均衡 | 只有排查问题的工程师 |
+| 监听地址 | `:8095`，所有网卡 | `localhost:6060`，**只有本机** |
+| K8s Service 暴露吗 | 暴露 | **不暴露**，用 `kubectl port-forward` |
+
+pprof 挂在业务 mux 上的话，要靠在路由上写鉴权来拦，写漏一处就暴露了（`/debug/pprof/cmdline` 会返回命令行参数）。
+⭐ 拆成两个端口靠的是**网络层面根本访问不到**：外部只能到 `:8095`，那个 mux 上没有 `/debug/pprof`；`localhost:6060` 机器外面连不上。
+这种隔离不依赖代码里每一处判断都写对。
+
+⚠️ 顺带一提：`import _ "net/http/pprof"` 会往 `http.DefaultServeMux` 注册 pprof。
+业务 server 如果用的是 `http.ListenAndServe(addr, nil)`（`nil` = `DefaultServeMux`），pprof 就跟着业务一起暴露了。所以业务 mux 要用 `http.NewServeMux()` 自己建。
+
+### 你已经见过的同类写法
+
+- **Spring Boot**：`management.server.port=8081`，Actuator 换到另一个端口。仍然是同一个 JVM
+- **operator**：controller-runtime 的 Manager 在同一个进程里开了健康检查 `:8081`、metrics、webhook `:9443` 几个端口。
+  设了 `PprofBindAddress` 就**再开一个**只挂 pprof 的 server，这部分代码 controller-runtime 替你写好了
+
+（相关：D16 §5.2、练习 ④⑤，D13 副作用 import）
+
+---
+
+## 23. pprof 是 Go 原生支持的吗
+
+**一句话**：是的，**采集、暴露、分析全套都是 Go 自带的**，`go.mod` 里不会多任何依赖。
+
+| 层 | 在哪 | 做什么 |
+|---|---|---|
+| **采集** | 标准库 `runtime/pprof`，底层是 runtime | 内存分配采样和 goroutine 状态一直在记；CPU 采样在请求时开始，每秒 100 次 |
+| **暴露** | 标准库 `net/http/pprof` | 包装成 `/debug/pprof/*` 这几个 HTTP handler |
+| **分析** | `go tool pprof`，随工具链安装 | `top`、`list`、`-http` 的 Web UI 和火焰图 |
+
+### 不走 HTTP 也能用
+
+没有 HTTP 服务的程序（命令行工具、批处理）直接写文件：
+
+```go
+f, _ := os.Create("cpu.pprof")
+pprof.StartCPUProfile(f)
+defer pprof.StopCPUProfile()
+```
+
+测试和 benchmark 里，`go test` 自带参数（D17 大量用）：
+
+```bash
+go test -bench=. -cpuprofile=cpu.pprof -memprofile=mem.pprof ./internal/xxx
+go tool pprof cpu.pprof
+```
+
+另有 `-blockprofile`、`-mutexprofile`。
+
+### 名字的来历
+
+pprof 最早是 Google C++ 性能工具包 **gperftools**（和 tcmalloc 同一个包）里的一个 Perl 脚本。
+Go 把这套思路内置进了 runtime；分析工具后来用 Go 重写成 `github.com/google/pprof`，`go tool pprof` 就是它随工具链打包的版本。
+
+⭐ 文件格式 `profile.proto`（protobuf）**不绑定语言**。Pyroscope、Parca、Google Cloud Profiler 等持续 profiling 平台都用它，
+其它语言的 profiler 也能导出成这个格式。学会 `go tool pprof`，看别的语言的 profile 也用得上。
+
+### 和 Java、Node 对比
+
+| | 是否内置 | 说明 |
+|---|---|---|
+| **Go** | ✅ 全部内置 | 开销低，生产环境常开，随时可抓 |
+| **Java** | 部分：JFR（JDK 11 起开源内置）、`jstack`、`jmap` | 火焰图通常装第三方 async-profiler，JFR 用 JMC 分析 |
+| **Node** | 部分：`--cpu-prof`、`--heap-prof`、inspector | 分析靠 Chrome DevTools |
+
+⚠️ 「默认开着」的只有内存采样。CPU 要请求时才采，block 和 mutex 要手动打开（D16 §5.1）。
+
+### 延伸：PGO，profile 反过来喂给编译器
+
+Go 1.21 起正式支持 **PGO**（Profile-Guided Optimization）：把线上抓的 CPU profile 命名为 `default.pgo`，
+放在 `main` 包目录下，`go build` 自动读取，对热点函数做更激进的内联等优化。官方数据通常提升 2% 到 14%。
+pprof 从排查工具变成了构建流程的一个输入（D17 再讲）。
+
+（相关：D16 §5、QA #22、D17 benchmark）
+
+---
+
+## 24. 生产环境 pprof 都是常开的吗？它会不会把进程搞垮
+
+**一句话**：**端点**常开很普遍，没人请求时开销为零；真正有开销的是**采集**。
+会伤到进程的情况确实存在，而且往往发生在**最需要它的时候**。
+
+先分清两件事：
+
+1. **端点开着**：`/debug/pprof/*` 注册好了，随时能抓。不请求就什么都不做
+2. **正在采集**：开销来自这里，而且不同 profile 差别很大
+
+### 实际生产里怎么做
+
+| 做法 | 常见程度 | 说明 |
+|---|---|---|
+| **端点常开，只对内网/本机开放** | 很常见 | 平时零开销，出事时直接抓。leakdemo 就是这样 |
+| **持续 profiling**：agent 定期抓（如每分钟抓 10 秒 CPU）存起来回看 | 大公司越来越多 | Pyroscope、Parca、Datadog、Google Cloud Profiler。Google 2010 年论文 *Google-Wide Profiling* 就是全公司抽样，开销宣称通常在 1% 左右或更低 |
+| **默认关闭，需要时改配置重启** | 保守、安全要求高的团队 | kubebuilder 的 `PprofBindAddress` 默认关闭 |
+
+例子：`kube-apiserver` 的 `--profiling` **默认 true**，但 CIS K8s 安全基线建议关掉。顾虑是**暴露面**，不是性能。
+
+### 会伤到进程的五种情况
+
+**① goroutine 巨多时抓 `?debug=2`：全局暂停**
+
+goroutine profile 只在开始和收尾各暂停一次，中间和业务并发采集。
+但 `debug=2`（panic 格式）走的是 `runtime.Stack(buf, true)`，**整个采集期间都 stop-the-world**（源码 `runtime/mprof.go` 里的 `stwAllGoroutinesStack`）。
+
+- 几百个 goroutine：瞬间完成
+- 几十万个：暂停明显变长，输出可能几百 MB，都是进程内临时分配的，容器里**可能被 OOMKill**
+
+⚠️ **goroutine 泄漏越严重，越想抓它，抓它的代价也越大。**
+排查时先用 `debug=1`（按栈分组计数）或默认的 proto 格式，**只抓一次**，不要写循环反复抓。
+
+**② 采样率调得过高**
+
+| 设置 | 默认 | 设过高的后果 |
+|---|---|---|
+| `runtime.MemProfileRate` | 每 512KB 采一次 | 设成 1 = **每次分配都记**，分配密集的服务明显变慢 |
+| `runtime.SetBlockProfileRate` | 0（关） | 设成 1 = 记录**每一次阻塞** |
+| `runtime.SetMutexProfileFraction` | 0（关） | 设成 1 = 记录每一次锁竞争 |
+
+生产上开 block/mutex 要用**抽样**，比如每 100 次记一次，不要设 1。
+
+**③ execution trace 最重**
+
+`/debug/pprof/trace` 记录每一次调度、GC、系统调用。Go 1.21 以后开销从 10%–20% 降到约 1%–2%；
+Go 1.25 加了 `runtime/trace.FlightRecorder`，在内存里一直保留最近几秒，出事时再导出。仍然只在需要时短时间开。
+
+**④ CPU profile 同一时刻只能有一份**
+
+第二个请求直接返回 `cpu profiling already in use`。不会拖垮进程，但会冲突，比如持续 profiling 的 agent 正在采，你手动抓就会失败。
+
+（更正：旧版本里 `seconds` 超过 server 的 `WriteTimeout` 会直接报错。
+现在的 `net/http/pprof` 会用 `http.NewResponseController` 把这次响应的写超时**延长** `seconds`，Go 1.26 下长时间抓取没问题。）
+
+**⑤ 端点暴露在外 = 自己给自己制造 DoS**
+
+不需要任何漏洞，反复请求 `goroutine?debug=2` 或 `profile?seconds=60`，就能让进程不停全局暂停、持续占 CPU。
+再加上 `cmdline` 泄露启动参数。这就是 QA #22「只对本机/内网开放」的原因。
+
+### 总结
+
+- **端点**：常开没问题，前提是只对本机或内网开放
+- **默认内存采样**：本来就一直开着，不用管
+- **CPU**：按需抓，或交给持续 profiling 平台定期抽样
+- **block / mutex / trace**：平时关，开就用抽样率、只开一小段时间
+- ⭐ **进程已经出问题时**：先抓最便宜的（`debug=1`、heap），抓一次就好，别在快撑不住的进程上反复加压
+
+（相关：QA #22 #23、D16 §5.1 §5.2）
+
+---
+
+## 25. 多个 controller 都 watch 同一种资源，informer 会收到什么
+
+**一句话**：⭐ **watch 和缓存按资源类型、按进程共享；筛选在事件处理函数里做；进入队列的是 owner 的 key。**
+
+场景：另一个 CRD `MonitorApp` 的 controller 在 `SetupWithManager` 里 `Owns` 了 Deployment、Service、ConfigMap、WebApp。
+
+### ① informer 收到的是全集群的变化
+
+`Owns(&corev1.ConfigMap{})` 会让 informer 收下**集群里所有 ConfigMap** 并全部缓存，不管和你有没有关系。
+「顺着 ownerReference 找父对象」是在**收到之后**、事件处理函数里做的，API server 不替你过滤。
+
+```
+Reflector.watch       ← 收全集群的对象
+   │ 写进缓存          ← 缓存里也是全集群的对象
+processorListener.run → 事件处理函数：看 ownerReference，对得上才入队，对不上丢掉
+```
+
+⚠️ **每加一个 `For` / `Owns` / `Watches`，代价是缓存整个集群里这种类型的对象。** 大集群里 `Owns(&corev1.Secret{})` 是 operator OOM 的常见原因。
+缩小范围：`cache.Options{DefaultNamespaces}`（限 namespace）、`ByObject` + label selector（API server 侧过滤）、`builder.OnlyMetadata`（只缓存 metadata）。
+
+### ② 同一个进程里 informer 共享，不会重复
+
+| 资源 | 同一个 Manager | 不同 operator 进程 |
+|---|---|---|
+| MonitorApp | 新增 1 个 informer | 新增 1 个 |
+| Deployment / Service / WebApp | **复用**，只多挂一组 `pop` + `run` | 各自一个，全集群缓存两份 |
+| ConfigMap | 新增 1 个 | 新增 1 个 |
+
+源码：`pkg/cache/internal/informers.go:90`，informer 存在 `map[schema.GroupVersionKind]*Cache` 里，同一 GVK 只有一个。
+profile 里的样子：`Reflector.watch` 数 = 资源类型数；每个 informer 上的 `processorListener` 组数 = 挂了几个处理函数。
+
+### ③ 进入队列的是 owner 的 key，不是子对象
+
+```
+某个 Deployment 变了
+  → controller ownerReference 是 MonitorApp/foo 吗？
+     是 → 入队「MonitorApp/foo」
+     否 → 丢掉
+  → Reconcile(MonitorApp/foo)     ← 不知道是 Deployment 还是 Service 变了
+```
+
+源码（`pkg/handler/enqueue_owner.go`）：
+- 默认只认 `controller: true` 的那个 ownerReference（`metav1.GetControllerOf`），除非 `MatchEveryOwner`
+- 对上 `For` 类型的 Kind + Group 才生成 `reconcile.Request{Name: ref.Name}`，namespace 取子对象自己的（ownerReference 不能跨 namespace）
+
+### ④ 误注册的 `Owns(&WebApp{})` 会怎样
+
+WebApp 一般没有指向 MonitorApp 的 controller ownerReference → 每次 WebApp 变化检查一遍、全部丢掉。**不报错，只是白做功**，所以很难被发现。
+同一进程里几乎没有内存代价（WebApp 本来就缓存着）；不同进程则多一条 watch 长连接 + 一份全集群缓存。
+
+⚠️ 换成 `Watches(&WebApp{}, 自定义 handler)` 就不一样了：自定义 handler 可以按任何规则入队，会**真的触发** reconcile。
+
+（相关：D20 §3.1 §3.2、D16 练习 ④ 数 informer、QA #22）

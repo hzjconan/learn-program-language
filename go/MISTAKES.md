@@ -44,6 +44,7 @@
 | 29 | D19 | Helm `indent` vs `nindent` | `indent` 让第一行多缩一层，YAML 直接解析失败 |
 | 30 | D19 | 缺失的 value 是什么 | 深度合并：从 values.yaml 拿默认；都没有才是 nil；`required` 两种都拦 |
 | 31 | D20 | `range` map 生成 desired | 顺序随机 → 每次「变了」→ Deployment 无限滚动重启；自己写对了却认不出 |
+| 32 | D16 | `_, span := tracer.Start(ctx, …)` 丢掉了新 ctx | 下游 span 挂到爷爷下面，不是 Place 的子 span |
 
 ---
 
@@ -869,3 +870,49 @@ D21 面试模拟对这个模式要专门出题：**给一段有已知坑的代�
   问「部署上线后会观察到什么现象」——要能答到「Pod 反复重启」而不只是「测试会红」。
 - 反过来：「怎么判断一个 reconcile 是不是幂等」——要答到「同一输入算两次，结果字节相同」。
 - 顺带考 D3：「`for k := range m` 两次的顺序一样吗？Go 为什么这么设计？」
+
+## 32 · D16 `_, span :=` 丢掉了新 ctx，子 span 挂错了父节点（小题 A6）
+
+**题目**：
+
+```go
+func (s *Service) Place(ctx context.Context, o *Order) error {
+    _, span := tracer.Start(ctx, "ordersvc.Place")
+    defer span.End()
+    if err := validate(o); err != nil { return err }
+    return s.repo.Save(ctx, o)      // repo.Save 里面也 tracer.Start(ctx, "repo.Save")
+}
+```
+
+`repo.Save` 的 span 挂在谁下面？`validate` 失败时，trace 后端里这个 span 是什么样？
+
+**当时的答案**：挂在 `ordersvc.Place` 下，因为用的是同一个 `ctx`。第二问没答。
+
+**正确规则**：**span 的父子关系完全由传下去的那个 ctx 决定。**
+`tracer.Start(ctx, ...)` 返回一个**新的** ctx，里面放着新开的 span；不把新 ctx 往下传，下游就看不到这个 span。
+
+```go
+_, span := tracer.Start(ctx, "ordersvc.Place")   // 新 ctx 被 _ 丢掉
+return s.repo.Save(ctx, o)                       // 传的是原来的 ctx，里面是 HTTP span
+```
+
+```
+POST /orders
+ ├─ ordersvc.Place      ← 只覆盖了 validate 那一小段
+ └─ repo.Save           ← 和 Place 是兄弟，挂到了爷爷下面
+```
+
+「用的是同一个 ctx」恰恰是原因，但结论反了：同一个 = **原来那个**，不是 Place 的。
+不报任何错，只是 trace 结构错了，看图的人会以为 Place 很快、Save 是独立的另一件事。
+
+第二问：只 `return err`，没有 `span.RecordError` + `span.SetStatus(codes.Error, …)` → span 状态 Unset，**后端显示成功**。
+
+⭐ **又是写对了、读别人代码认不出**：D16 ⑥ 自己写的是 `ctx, span :=`，父子关系还在 span 文件里亲眼验证过。
+和 [#22](#22--d12-类型断言穿不透-w-包装小题-a6)、[#23](#23--d13-循环读完没报错不等于读全了小题-a3)、
+[#27](#27--d14-httperrorw-errerror-500-的两个问题小题-a4)、[#28](#28--d15-osexit-跳过-deferlogfatal-退的是进程不是-goroutine小题-a5)、
+[#31](#31--d20-用-range-map-生成-desired-状态小题-a8答不知道) 同一个模式，**第六次**。
+
+**重测角度**：
+- 换成别的 ctx 携带物问同一件事：`ctx, cancel := context.WithTimeout(ctx, …)` 之后往下传了原来的 `ctx`，超时还生效吗？（D10：取消和 trace 都靠「把新 ctx 传下去」）
+- 给一张 trace 图（Place 只有 0.1ms、Save 和 Place 平级），问「代码里最可能哪一行写错了」——反向从现象找代码
+- 命名返回值 + defer 记录错误的写法里，块内 `err :=` 遮蔽后**没有 return** 的版本，span 是什么状态？

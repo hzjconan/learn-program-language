@@ -62,6 +62,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var pprofAddr string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -82,6 +83,12 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// TODO(D16) ④：加一个 --pprof-bind-address flag（默认 "0" = 关闭，和 metrics 一样），
+	// 传给下面 ctrl.Options 的 PprofBindAddress。Manager 会自己起一个只挂 pprof 的 server。
+	// ⚠️ 本机调试用 localhost:6061，别写 :6061（§5.2：pprof 能看到内存里的数据）。
+	flag.StringVar(&pprofAddr, "pprof-bind-address", "0",
+		"The address the pprof endpoint binds to, e.g. localhost:6061. Leave as 0 to disable. "+
+			"Bind to localhost only: pprof exposes heap contents and the process command line.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -165,6 +172,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "1890f85e.golearn.dev",
+		PprofBindAddress:       pprofAddr,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

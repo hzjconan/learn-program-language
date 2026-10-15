@@ -33,6 +33,10 @@ D21  收尾 + 面试模拟
 ⚠️ 所以 **D18 必须补一节：带读 kubebuilder 生成的 `Dockerfile` 和 `Makefile`**，
 把 D20 当时「照着跑」的那些命令倒回来讲清楚。这是用户明确要求的安排，别漏。
 
+⚠️ **D18 还要顺带处理（D16 发现）**：operator `cmd/main.go` 里 kubebuilder 生成的 `zap.Options{Development: true}` 是硬编码的，
+部署进集群的也是开发模式（默认 Debug 级别、Warn 以上带堆栈、文本格式非 JSON）。D16 练习 ① 那条 409 ERROR 带一大段堆栈就是它。
+生产要 `--zap-devel=false` 或改默认值。关掉以后，冲突分支的 `V(1)` 日志不再打印，持续冲突就看不见了 → 要补 `conflicts_total` counter。
+
 用户 D14 已经手写过多阶段 distroless 镜像（12.2MB），底子够；
 D18 要补的是**交叉编译**和 **`ldflags` 注入版本信息**这两块。
 
@@ -376,7 +380,7 @@ kind delete cluster --name golearn   # 收工
 - [x] D13 数据库 —— `internal/orders` repository（事务 / rows 生命周期 / NULL / 错误翻译）· Postgres 17 via docker compose · 变异测试 7/9 · 覆盖率 87.8% · `cmd/dbdemo` 九段演示
 - [x] D14 周综合项目：REST API 服务 —— handler/service/repository 三层 + 构造函数注入（接口定义在消费方）· `ordersvc` 100% · `api` 91.3% · 端到端跑通 · Docker 镜像 12.2MB
 - [ ] D15 测试进阶
-- [ ] D16 可观测性
+- [x] D16 可观测性
 - [ ] D17 性能与内存
 - [ ] D18 构建与交付
 - [x] D19 云原生基础

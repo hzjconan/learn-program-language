@@ -39,6 +39,8 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Middleware 是中间件的统一签名：收一个 Handler，返回包装过的 Handler。
@@ -99,6 +101,9 @@ type ctxHandler struct{ slog.Handler }
 func (h ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 	if id, ok := RequestIDFrom(ctx); ok {
 		r.AddAttrs(slog.String("request_id", id))
+	}
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
 	}
 	return h.Handler.Handle(ctx, r)
 }

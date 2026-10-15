@@ -29,6 +29,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // 副作用导入：注册 pgx 驱动（D13 §2）
 
 	"github.com/hzjconan/learn-program-language/go/internal/config"
+	"github.com/hzjconan/learn-program-language/go/internal/httpx"
+	"github.com/hzjconan/learn-program-language/go/internal/obs"
 	"github.com/hzjconan/learn-program-language/go/internal/server"
 )
 
@@ -69,8 +71,23 @@ func run() error {
 	}
 
 	// ② 建 logger
-	logger := config.NewLogger(cfg, os.Stdout)
+	baseLogger := config.NewLogger(cfg, os.Stdout)
+	logger := slog.New(httpx.WithRequestID(baseLogger.Handler()))
 	logger.Info("启动服务", "config", cfg)
+
+	traceCtx := context.Background()
+	shutdownTracing, err := obs.SetupTracing(traceCtx, os.Stderr, "golearn-api")
+	if err != nil {
+		return fmt.Errorf("设置 tracing: %w", err)
+	}
+
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			logger.Error("关闭 tracing 失败，最后一批 span 可能丢失", "err", err)
+		}
+	}()
 
 	// ③ 连数据库 —— 带超时的上下文
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)

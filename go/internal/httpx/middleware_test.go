@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // 测试文件是我写的，别改。
@@ -530,6 +532,36 @@ func TestHTTPX_WithRequestIDSurvivesWith(t *testing.T) {
 		ln := parseLines(t, &buf)[0]
 		if ln["request_id"] != "req-1" {
 			t.Errorf("request_id = %v, want req-1", ln["request_id"])
+		}
+	})
+}
+
+func TestHTTPX_LogsTraceID(t *testing.T) {
+	logOnce := func(ctx context.Context) map[string]any {
+		var buf bytes.Buffer
+		slog.New(WithRequestID(slog.NewJSONHandler(&buf, nil))).InfoContext(ctx, "x")
+		return parseLines(t, &buf)[0]
+	}
+
+	t.Run("ctx 里有 span：带上 trace_id", func(t *testing.T) {
+		sc := trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: trace.TraceID{0x4b, 0xf9, 0x2f, 0x35},
+			SpanID:  trace.SpanID{0x00, 0xf0, 0x67},
+		})
+		ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+		ln := logOnce(ctx)
+		want := sc.TraceID().String()
+		if ln["trace_id"] != want {
+			t.Errorf("trace_id = %v, want %s\n（ctxHandler.Handle 没从 ctx 取 SpanContext？）", ln["trace_id"], want)
+		}
+	})
+
+	t.Run("ctx 里没有 span：不出现 trace_id 字段", func(t *testing.T) {
+		ln := logOnce(context.Background())
+		if v, ok := ln["trace_id"]; ok {
+			t.Errorf("没有 span 时日志里出现了 trace_id = %v，want 没有这个字段\n"+
+				"（全零的 trace_id 会让人以为所有请求属于同一条 trace）", v)
 		}
 	})
 }
