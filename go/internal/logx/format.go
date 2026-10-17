@@ -74,12 +74,13 @@ func (f TextFormatter) Format(w io.Writer, r *Report) error {
 	}
 	fmt.Fprintln(tw) //nolint:errcheck // 写的是内存缓冲，不会失败
 
-	// 分位数
-	fmt.Fprintln(tw, "分位数\t耗时")                      //nolint:errcheck // 写的是内存缓冲，不会失败
-	fmt.Fprintf(tw, "p50\t%v\n", r.Percentile(0.5))  //nolint:errcheck // 写的是内存缓冲，不会失败
-	fmt.Fprintf(tw, "p95\t%v\n", r.Percentile(0.95)) //nolint:errcheck // 写的是内存缓冲，不会失败
-	fmt.Fprintf(tw, "p99\t%v\n", r.Percentile(0.99)) //nolint:errcheck // 写的是内存缓冲，不会失败
-	fmt.Fprintln(tw)                                 //nolint:errcheck // 写的是内存缓冲，不会失败
+	// 分位数 —— 一次排序算出三个
+	ps := r.percentiles([]float64{0.5, 0.95, 0.99})
+	fmt.Fprintln(tw, "分位数\t耗时")         //nolint:errcheck
+	fmt.Fprintf(tw, "p50\t%v\n", ps[0]) //nolint:errcheck
+	fmt.Fprintf(tw, "p95\t%v\n", ps[1]) //nolint:errcheck
+	fmt.Fprintf(tw, "p99\t%v\n", ps[2]) //nolint:errcheck
+	fmt.Fprintln(tw)                    //nolint:errcheck // 写的是内存缓冲，不会失败
 
 	// 最慢条目
 	if f.Top > 0 {
@@ -196,9 +197,10 @@ func (f JSONFormatter) Format(w io.Writer, r *Report) error {
 		ByService: byService,
 		Slowest:   slowest,
 	}
-	out.LatencyMs.P50 = int(r.Percentile(0.5) / time.Millisecond)
-	out.LatencyMs.P95 = int(r.Percentile(0.95) / time.Millisecond)
-	out.LatencyMs.P99 = int(r.Percentile(0.99) / time.Millisecond)
+	ps := r.percentiles([]float64{0.5, 0.95, 0.99})
+	out.LatencyMs.P50 = int(ps[0] / time.Millisecond)
+	out.LatencyMs.P95 = int(ps[1] / time.Millisecond)
+	out.LatencyMs.P99 = int(ps[2] / time.Millisecond)
 
 	enc := json.NewEncoder(w)
 	if f.Indent {

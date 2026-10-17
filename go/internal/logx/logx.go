@@ -156,8 +156,16 @@ func (e *ParseError) Unwrap() error {
 // 提示：strings.SplitN(s, " ", 5) 一次切出至多五段，第五段就是整条消息（D3）。
 // 想想为什么不能用 strings.Split —— 消息里含空格时会被切碎。
 func ParseLine(lineNo int, s string) (Entry, error) {
-	parts := strings.SplitN(s, " ", 5)
-	if len(parts) < 4 {
+	// 用 strings.Cut 逐段切，比 SplitN 省掉 []string 的分配。
+	// Cut 不分配：返回的子串和 s 共享内存，并且会被存进 Entry。
+	// 这是安全的，因为 s 是 string（调用方用 scanner.Text() 复制出来的），不会被复用覆盖。
+	timeStr, rest, f1 := strings.Cut(s, " ")
+	levelStr, rest, f2 := strings.Cut(rest, " ")
+	serviceStr, rest, f3 := strings.Cut(rest, " ")
+	latencyStr, msgStr, f4 := strings.Cut(rest, " ")
+
+	// 至少要 3 个空格才能切出 4 段
+	if !f1 || !f2 || !f3 {
 		return Entry{}, &ParseError{
 			Line:  lineNo,
 			Field: "format",
@@ -166,10 +174,6 @@ func ParseLine(lineNo int, s string) (Entry, error) {
 	}
 
 	result := Entry{}
-	timeStr := parts[0]
-	levelStr := parts[1]
-	serviceStr := parts[2]
-	latencyStr := parts[3]
 
 	t, err := time.Parse(time.RFC3339, timeStr)
 	if err != nil {
@@ -211,8 +215,8 @@ func ParseLine(lineNo int, s string) (Entry, error) {
 	}
 	result.Latency = time.Duration(v) * time.Millisecond
 
-	if len(parts) == 5 {
-		result.Message = parts[4]
+	if f4 {
+		result.Message = msgStr
 	}
 	return result, nil
 }

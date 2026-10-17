@@ -381,7 +381,7 @@ kind delete cluster --name golearn   # 收工
 - [x] D14 周综合项目：REST API 服务 —— handler/service/repository 三层 + 构造函数注入（接口定义在消费方）· `ordersvc` 100% · `api` 91.3% · 端到端跑通 · Docker 镜像 12.2MB
 - [ ] D15 测试进阶
 - [x] D16 可观测性
-- [ ] D17 性能与内存
+- [x] D17 性能与内存
 - [ ] D18 构建与交付
 - [x] D19 云原生基础
 - [x] D20 Operator 实战

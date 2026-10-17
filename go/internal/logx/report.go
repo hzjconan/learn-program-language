@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// compareEntry 按 TopSlowest 的输出排序规则比较：Latency 降序，相同时 Time 升序。
+// 返回正数表示 a 应排在 b 前面。
+func compareEntry(a, b Entry) int {
+	if c := cmp.Compare(b.Latency, a.Latency); c != 0 {
+		return c
+	}
+	return a.Time.Compare(b.Time)
+}
+
 // Report 是一批日志的聚合结果。
 //
 // # 字段为什么导出
@@ -67,6 +76,36 @@ func (r *Report) AddFailure(err error) {
 	r.Failed = append(r.Failed, err)
 }
 
+func percentileOfSorted(l []time.Duration, p float64) time.Duration {
+	n := len(l)
+	if n == 0 {
+		return 0
+	}
+	idx := int(math.Ceil(p*float64(n))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	return l[idx]
+}
+
+// percentiles 一次排序、一次算出多个分位数。
+// 两个 Formatter 都调这个，避免三次独立排序。
+func (r *Report) percentiles(ps []float64) []time.Duration {
+	l := make([]time.Duration, len(r.entries))
+	for i, e := range r.entries {
+		l[i] = e.Latency
+	}
+	slices.Sort(l)
+	result := make([]time.Duration, len(ps))
+	for i, p := range ps {
+		result[i] = percentileOfSorted(l, p)
+	}
+	return result
+}
+
 // Percentile 返回耗时的 p 分位数，p 取值 [0, 1]。
 //
 // TODO(D7)：实现我。
@@ -82,24 +121,7 @@ func (r *Report) AddFailure(err error) {
 // ⚠️ 性能提示：如果你每次调用都重新排序，跑 p50/p95/p99 就排了三次。
 // review 时我会看你怎么处理 —— 但**别过早优化**，先写对，用 benchmark 说话（D6 §6）。
 func (r *Report) Percentile(p float64) time.Duration {
-	n := len(r.entries)
-	if n == 0 {
-		return 0
-	}
-
-	// 避免直接改到原始的latencies切片数据
-	l := make([]time.Duration, n)
-	for i, v := range r.entries {
-		l[i] = v.Latency
-	}
-	// 排序（升序）
-	slices.Sort(l)
-
-	idx := max(int(math.Ceil(p*float64(n)))-1, 0)
-	if idx >= n {
-		idx = n - 1
-	}
-	return l[idx]
+	return r.percentiles([]float64{p})[0]
 }
 
 // TopSlowest 返回最慢的 n 条，按耗时**降序**。
@@ -115,16 +137,22 @@ func (r *Report) TopSlowest(n int) []Entry {
 		return nil
 	}
 
-	elen := len(r.entries)
-	e := make([]Entry, elen)
-	copy(e, r.entries)
-	slices.SortFunc(e, func(a, b Entry) int {
-		if c := cmp.Compare(b.Latency, a.Latency); c != 0 { // 降序
-			return c
+	// 按最终顺序（最慢在前）维护小切片，容量预留 n+1 避免 Insert 时扩容
+	result := make([]Entry, 0, n+1)
+	for _, e := range r.entries {
+		// 装满了：e 不比当前最后一名靠前 → 进不了前 n 名，跳过
+		if len(result) == n && compareEntry(e, result[n-1]) >= 0 {
+			continue
 		}
-		return a.Time.Compare(b.Time) // 升序
-	})
-	return e[:min(n, elen)]
+		// BinarySearch 找 e 该插的位置，Insert 插入
+		i, _ := slices.BinarySearchFunc(result, e, compareEntry)
+		result = slices.Insert(result, i, e)
+		// 挤掉最后一名（尾部截断，容量不变，不重新分配）
+		if len(result) > n {
+			result = result[:n]
+		}
+	}
+	return result
 }
 
 // TimeRange 返回最早和最晚的日志时间。没有样本时返回两个零值。
@@ -169,12 +197,12 @@ func Analyze(r io.Reader) (*Report, error) {
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
-
-		if strings.TrimSpace(scanner.Text()) == "" {
+		text := scanner.Text()
+		if strings.TrimSpace(text) == "" {
 			continue // 空行
 		}
 
-		entry, err := ParseLine(lineNo, scanner.Text())
+		entry, err := ParseLine(lineNo, text)
 		if err != nil {
 			rpt.AddFailure(err)
 			continue

@@ -27,7 +27,8 @@
 | [D15](notes/D15.md) | 测试进阶 | 09-12 |
 | [D19](notes/D19.md) | 云原生基础：控制循环、client-go、Helm | 09-13 → 09-16 |
 | [D20](notes/D20.md) | 写一个 Operator | 09-16 → 09-28 |
-| [D16](notes/D16.md) | 可观测性：指标、pprof、trace | 09-29 |
+| [D16](notes/D16.md) | 可观测性：指标、pprof、trace | 09-29 → 10-15 |
+| [D17](notes/D17.md) | 性能与内存 | 10-15 → 10-17 |
 
 执行顺序按 [LEARNING-PLAN §0'](LEARNING-PLAN.md)：D15 → D19 → D20 → D16 → D17 → D18 → D21。
 

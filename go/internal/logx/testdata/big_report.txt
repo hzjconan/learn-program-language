@@ -1,0 +1,32 @@
+总条数   19960
+失败条数  19
+
+级别     计数
+INFO   11976
+WARN   3992
+ERROR  3992
+
+服务           计数
+api-gateway  3994
+orders       3993
+payments     3990
+search       3990
+users        3993
+
+分位数  耗时
+p50  1s
+p95  1.9s
+p99  1.98s
+
+最慢的 10 条
+时间                    级别    服务           耗时      消息
+2026-08-18T10:05:21Z  INFO  payments     1.999s  GET /items/321 -> 200
+2026-08-18T10:38:41Z  INFO  users        1.999s  GET /items/2321 -> 200
+2026-08-18T11:12:01Z  INFO  api-gateway  1.999s  GET /items/4321 -> 200
+2026-08-18T11:45:21Z  INFO  payments     1.999s  GET /items/6321 -> 200
+2026-08-18T12:18:41Z  INFO  users        1.999s  GET /items/8321 -> 200
+2026-08-18T12:52:01Z  INFO  api-gateway  1.999s  GET /items/10321 -> 200
+2026-08-18T13:25:21Z  INFO  payments     1.999s  GET /items/12321 -> 200
+2026-08-18T13:58:41Z  INFO  users        1.999s  GET /items/14321 -> 200
+2026-08-18T14:32:01Z  INFO  api-gateway  1.999s  GET /items/16321 -> 200
+2026-08-18T15:05:21Z  INFO  payments     1.999s  GET /items/18321 -> 200

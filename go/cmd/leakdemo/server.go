@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -66,9 +67,20 @@ func fetchPrice(sym string) float64 {
 // maxIngestBytes 是单条上报的上限。
 const maxIngestBytes = 64 << 10
 
+// 用sync.Pool改写之前的buf := make([]byte, maxIngestBytes)
+var bufPool = sync.Pool{
+	New: func() any { b := make([]byte, maxIngestBytes); return &b },
+}
+
 // ingest 接收客户端上报的一条事件。同一条事件客户端可能重发，按前 16 字节签名去重。
 func (s *server) ingest(w http.ResponseWriter, r *http.Request) {
-	buf := make([]byte, maxIngestBytes)
+	bufP := bufPool.Get().(*[]byte) //nolint:errcheck // bufPool.New 只返回 *[]byte，没有别的地方往里 Put
+	// 放进池子的是*[]byte，如果放切片]byte，因为Put的参数类型是any，需要装箱，又需要额外分配一次 - 复制切片
+	// 放回去前不需要清理，下面io.ReadFull是从切片第一位开始“覆盖写”，所以如果第一个请求写入了5个A，第二个请求写入了3个B，
+	// 那么buf里面实际的数据是【BBBAA】，下面读buf[:sigLen]，已经保证了sigLen <= n，所以一定不会读入上一次的旧数据 - AAA
+	// buf不能放特别大的对象，这里的缓冲区固定 64KB，ReadFull 只覆盖写、不会扩容，所以这个问题不存在
+	defer bufPool.Put(bufP)
+	buf := *bufP
 	n, err := io.ReadFull(io.LimitReader(r.Body, maxIngestBytes), buf)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)

@@ -45,6 +45,7 @@
 | 30 | D19 | 缺失的 value 是什么 | 深度合并：从 values.yaml 拿默认；都没有才是 nil；`required` 两种都拦 |
 | 31 | D20 | `range` map 生成 desired | 顺序随机 → 每次「变了」→ Deployment 无限滚动重启；自己写对了却认不出 |
 | 32 | D16 | `_, span := tracer.Start(ctx, …)` 丢掉了新 ctx | 下游 span 挂到爷爷下面，不是 Place 的子 span |
+| 33 | D17 | 存活堆超过 GOMEMLIMIT，当成了「分配太多」 | `->480 MB` 是留着的，不是分配的：看 `inuse_space`，调 GOGC 没用 |
 
 ---
 
@@ -916,3 +917,32 @@ POST /orders
 - 换成别的 ctx 携带物问同一件事：`ctx, cancel := context.WithTimeout(ctx, …)` 之后往下传了原来的 `ctx`，超时还生效吗？（D10：取消和 trace 都靠「把新 ctx 传下去」）
 - 给一张 trace 图（Place 只有 0.1ms、Save 和 Place 平级），问「代码里最可能哪一行写错了」——反向从现象找代码
 - 命名返回值 + defer 记录错误的写法里，块内 `err :=` 遮蔽后**没有 return** 的版本，span 是什么状态？
+
+## 33 · D17 存活堆超过 `GOMEMLIMIT`，当成了「分配太多」（小题 A4）
+
+**题目**：Pod 内存限制 512Mi，设了 `GOMEMLIMIT=460MiB`，gctrace 显示 `->480 MB`（存活堆），GC 占 CPU 50%。
+发生了什么？调大 `GOGC` 有用吗？应该先查什么？
+
+**当时的答案**：GC 太频繁，程序分配了太多内存，去看 profile 的 `B/op`、`allocs/op`。`GOGC` 那问没答。
+
+**正确规则**：gctrace 的 `A->B->C MB` 里，**C 是 GC 之后还活着的数据**。C 超过上限，问题是「**留着的太多**」，不是「分配得多」。
+
+| | 分配压力（D17） | 存活数据太多 / 泄漏（D16） |
+|---|---|---|
+| gctrace | GC 次数多、GC 占 CPU 高，**C 稳定** | **C 很大或一直涨** |
+| heap profile 看 | `alloc_space` / `alloc_objects` | **`inuse_space`**（加 `gc=1`） |
+| 怎么修 | 少分配、复用、调 GOGC | 找谁留着它；或者确实需要就加内存、限制缓存大小 |
+
+这题的完整推理：
+
+- 存活数据超过软上限 → GC 拼命跑也压不下去 → runtime 把 GC 限制在约 50% CPU 防止死亡螺旋（题目里的 50% 就是它）→ **允许内存继续超过上限** → 离容器上限只剩约 30MB，**马上 OOMKill**
+- **调大 GOGC 没用**：堆接近 `GOMEMLIMIT` 时 GC 由上限驱动，`GOGC` 多大都一样，`GOGC=off` 也一样
+- **先查**：heap profile 的 `inuse_space`，看是谁留着这 480MB。泄漏就修；业务确实需要就调大容器内存或限制缓存
+
+⭐ **这个区别我前一天明确问过（「D16 的内存泄漏和 D17 讲的有什么区别」），也理解了**，换到一个新场景就没认出来，看到「GC 占 CPU 高」就直接套了「分配太多」。
+和 [#32](#32--d16-_-span--丢掉了新-ctx子-span-挂错了父节点小题-a6) 同一个模式：知道规则，读题时没拿规则去对照题目给的数字。
+
+**重测角度**：
+- 给两段 gctrace，一段 C 稳定在 50MB、GC 每秒 30 次；一段 C 从 100 涨到 400MB、GC 每秒 2 次。问各是什么问题、各看哪个 `sample_index`
+- 「GC 占 CPU 50%，把 GOGC 从 100 调到 400」：什么情况下有用、什么情况下没用（关键：有没有设 `GOMEMLIMIT`、存活堆离上限多远）
+- 反过来问：练习 ③ 的 `GOMEMLIMIT=100MiB` 那组，GC 104 次、RSS 仍然 275MB，为什么？要能答到「存活数据本身超过上限，软上限压不住」

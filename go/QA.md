@@ -460,7 +460,7 @@ func f() int {
 | 赋值给全局变量/更外层结构 | `global = append(global, &x)` |
 | **传给 `interface{}`** | `fmt.Println(x)` ← 高频易忽略 |
 | 闭包捕获且闭包本身逃出 | `return func() { use(x) }` |
-| 编译期大小不确定 | `make([]int, n)`，n 是变量 |
+| 编译期大小不确定 | `make([]int, n)`，n 是变量。⚠️ **Go 1.25 起**：编译器在栈上预留 32 字节，运行时放得下就用栈、放不下才上堆（D17 实测 `n≤4` 个 int 是 0 allocs，`n=5` 是 1 alloc）。`-m` 会显示 `does not escape`，意思是「不一定上堆」 |
 | 太大（`make`/`new` 约 64KB 上限） | `make([]int, 100000)` |
 | 编译器分析不出（反射、跨包） | 保守起见一律逃逸 |
 
