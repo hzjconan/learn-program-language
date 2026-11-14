@@ -17,6 +17,14 @@ defaults:
   run:
     working-directory: go
 
+# TODO(D18) ⑤：再加两个 job（讲义 §6）
+#
+#   operator     ⚠️ go/operator 是嵌套模块，上面 test job 的 go test ./... 从来没进去过 —— CI 绿，但 operator 一次都没被测过
+#                working-directory: go/operator；make test（会自己下载 envtest 二进制）、make lint
+#                再加一步「生成的代码有没有过期」：make manifests generate 之后 git diff --exit-code
+#   image        docker build golearn-api 镜像（VERSION=提交号），检查大小 < 20MB，
+#                docker run 一下，确认能启动、/version 能返回（没有数据库也行吗？想一想）
+#
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -62,3 +70,112 @@ jobs:
         with:
           name: coverage
           path: go/coverage.out
+
+  # ⚠️ go/operator 是【另一个模块】（有自己的 go.mod），上面 test job 的
+  # go test ./... 从来没进去过 —— 加这个 job 之前，CI 一直是绿的，
+  # 但 operator 的测试一次都没在 CI 上跑过。
+  operator:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go/operator
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/operator/go.mod
+          cache-dependency-path: go/operator/go.sum
+
+      # 生成代码过期检查（§5.3）：CRD / RBAC / DeepCopy 都是从 markers 生成的。
+      # 改了 markers 忘了 make manifests generate，这里就会 diff 出东西来。
+      - name: Regenerate manifests and deepcopy
+        run: make manifests generate
+
+      # 不指定路径的 git diff 会检查整个工作树，在子目录执行也可以。
+      - name: Check generated code is up to date
+        working-directory: .
+        run: git diff --exit-code
+
+      # make test 依赖 setup-envtest，会自己下载 kube-apiserver / etcd。
+      # ⭐ 用 make test 而不是裸 go test：环境变量 KUBEBUILDER_ASSETS 由 Makefile 拼好。
+      - name: Unit tests
+        run: make test
+
+      - name: Lint
+        run: make lint
+
+  # ⭐ 「能编译」不等于「镜像能启动」。这里真的把镜像跑起来，curl 一下 /version。
+  #
+  # 为什么需要 postgres：golearn-api 启动时会 PingContext 数据库，
+  # 连不上直接 exit(1)（D13）—— 没有数据库它根本起不来。
+  # 所以用 service container 起一个真库，容器通过 host.docker.internal 连过去。
+  image:
+    runs-on: ubuntu-latest
+    # Dockerfile 里用了 RUN --mount=type=cache，只有 BuildKit 认识。
+    # 新版 Docker 默认就是 BuildKit，这里显式声明一下，免得 runner 镜像变回旧引擎时静默失败。
+    env:
+      DOCKER_BUILDKIT: '1'
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: devuser
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: golearn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devuser -d golearn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        id: build
+        run: |
+          echo "VERSION=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          docker build \
+            --build-arg VERSION="$(git rev-parse --short HEAD)" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            -t golearn-api:ci .
+
+      - name: Check image size under 20MiB
+        run: make image-size IMAGE=golearn-api:ci
+
+      - name: Smoke test the image
+        run: |
+          docker run -d --name api \
+            -p 8080:8080 \
+            --add-host=host.docker.internal:host-gateway \
+            -e DATABASE_URL='postgres://devuser:devpass@host.docker.internal:5432/golearn?sslmode=disable' \
+            golearn-api:ci
+
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080/version -o /tmp/version.json && break
+            sleep 1
+          done
+
+          if [ ! -s /tmp/version.json ]; then
+            echo "::error::30 秒内 /version 没有响应"
+            docker logs api
+            exit 1
+          fi
+
+          cat /tmp/version.json
+          # 版本号真的注入进去了吗（不能是 dev）
+          grep -q "\"version\":\"${{ steps.build.outputs.VERSION }}\"" /tmp/version.json || {
+            echo "::error::/version 里的 version 和提交号对不上 —— -ldflags -X 没生效？"
+            exit 1
+          }
+
+          # 提交号也必须与构建时传入的值一致
+          jq -e --arg revision "$GITHUB_SHA" ' .revision == $revision ' /tmp/version.json > /dev/null
+
+      - name: Container logs and cleanup
+        if: always()
+        run: |
+          docker logs api 2>&1 || true
+          docker rm -f api 2>/dev/null || true

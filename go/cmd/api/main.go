@@ -28,6 +28,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // 副作用导入：注册 pgx 驱动（D13 §2）
 
+	"github.com/hzjconan/learn-program-language/go/internal/buildinfo"
 	"github.com/hzjconan/learn-program-language/go/internal/config"
 	"github.com/hzjconan/learn-program-language/go/internal/httpx"
 	"github.com/hzjconan/learn-program-language/go/internal/obs"
@@ -73,7 +74,16 @@ func run() error {
 	// ② 建 logger
 	baseLogger := config.NewLogger(cfg, os.Stdout)
 	logger := slog.New(httpx.WithRequestID(baseLogger.Handler()))
-	logger.Info("启动服务", "config", cfg)
+	// TODO(D18) ①：启动日志里带上 buildinfo.Get()（版本、提交号）。
+	bi := buildinfo.Get()
+	logger.Info("启动服务", "config", cfg,
+		"version", bi.Version,
+		"revision", bi.Revision,
+		"commitTime", bi.Time,
+		"modified", bi.Modified,
+		"goVersion", bi.GoVersion,
+	)
+	// 凌晨三点看日志的人第一个问题就是「出事的是哪个版本」。
 
 	traceCtx := context.Background()
 	shutdownTracing, err := obs.SetupTracing(traceCtx, os.Stderr, "golearn-api")

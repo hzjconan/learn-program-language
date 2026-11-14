@@ -27,6 +27,7 @@ package server
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/hzjconan/learn-program-language/go/internal/api"
+	"github.com/hzjconan/learn-program-language/go/internal/buildinfo"
 	"github.com/hzjconan/learn-program-language/go/internal/config"
 	"github.com/hzjconan/learn-program-language/go/internal/httpx"
 	"github.com/hzjconan/learn-program-language/go/internal/orders"
@@ -55,6 +57,11 @@ func NewHandler(cfg config.Config, db *sql.DB, logger *slog.Logger) http.Handler
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
+	// TODO(D18) ①：加 GET /version，返回 buildinfo.Get() 的 JSON。和 /livez 一样不走限流（看下面 Unless 那一行）。
+	mux.Handle("GET /version", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(buildinfo.Get()) //nolint:errcheck // 响应已开始写、失败无法补救
+	}))
 	mux.Handle("/", router)
 
 	// 挂中间件。顺序见 D11 §4：
@@ -66,7 +73,7 @@ func NewHandler(cfg config.Config, db *sql.DB, logger *slog.Logger) http.Handler
 		httpx.Chain(mux,
 			httpx.RequestID,
 			httpx.Recover(onPanic(logger)),
-			httpx.Unless(httpx.RateLimit(cfg.RateLimit, time.Minute), httpx.PathIs("/healthz", "/livez")),
+			httpx.Unless(httpx.RateLimit(cfg.RateLimit, time.Minute), httpx.PathIs("/healthz", "/livez", "/version")),
 			httpx.Logging(logger),
 		),
 		"golearn-api",

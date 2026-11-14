@@ -55,12 +55,23 @@ var (
 		},
 		[]string{"namespace", "name"},
 	)
+
+	// TODO(D18) ④：golearn_webapp_conflicts_total（counter，无 label），Reconcile 入口检测到 IsConflict 时 +1。
+	// 偶尔涨是正常的；每秒都在涨 = 有两个 controller 在争同一个字段（D16 ② 3c）。
+	// 在 TestReconcile_ConflictIsRequeuedNotError 里顺便断言它 +1。
+	conflictsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "golearn_webapp_conflicts_total",
+			Help: "Reconcile conflicts handled by scheduling a retry.",
+		},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(childOpsTotal)
 	metrics.Registry.MustRegister(statusUpdatesTotal)
 	metrics.Registry.MustRegister(readyReplicas)
+	metrics.Registry.MustRegister(conflictsTotal)
 }
 
 // TODO(D16) ③（做完 ② 再做）：

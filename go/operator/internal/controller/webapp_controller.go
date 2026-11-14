@@ -118,6 +118,7 @@ func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// 预期内：别的 writer 刚改过这个对象，我们读到的缓存版本过时了。
 		// 不当成错误（不刷 ERROR、不计入 result="error"），稍后重试。
 		logf.FromContext(ctx).V(1).Info("conflict, requeueing", "err", err)
+		conflictsTotal.Inc()
 		return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 	}
 	return ctrl.Result{}, err

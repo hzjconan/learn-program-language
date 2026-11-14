@@ -89,8 +89,11 @@ func main() {
 	flag.StringVar(&pprofAddr, "pprof-bind-address", "0",
 		"The address the pprof endpoint binds to, e.g. localhost:6061. Leave as 0 to disable. "+
 			"Bind to localhost only: pprof exposes heap contents and the process command line.")
+	// TODO(D18) ④：Development: true 是 kubebuilder 生成的默认值，部署进集群也是开发模式
+	// （Debug 级别、Warn 以上带堆栈、文本格式）。改成默认 false：本机调试用 --zap-devel=true 打开。
+	// 关掉以后冲突分支的 V(1) 日志就不打印了 → 去 metrics.go 补 conflicts_total（D16 留下的）。
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()

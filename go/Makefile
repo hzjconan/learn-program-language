@@ -1,7 +1,8 @@
 .PHONY: check test test-all race race-all lint fmt cover clean clean-containers \
         helm-sync helm-template helm-template-dev helm-template-prod helm-lint helm-install-dev helm-uninstall kind-load \
         image kind-load-image deploy-dev \
-        db-up db-migrate db-psql db-down
+        db-up db-migrate db-psql db-down \
+		build build-cross
 
 # D15 起，带 //go:build integration 标签的测试（testcontainers、真库）
 # 要显式加标签才会跑。
@@ -126,9 +127,45 @@ GIT_DIRTY := $(shell git diff --quiet || echo -dirty)
 IMAGE_TAG ?= $(GIT_SHA)$(GIT_DIRTY)
 IMAGE      = golearn-api:$(IMAGE_TAG)
 
+# TODO(D18) ②③：加几个 target（讲义 §2、§5）
+#   build        本机编译，-trimpath + -ldflags 注入 VERSION（复用上面的 IMAGE_TAG）
+#   build-cross  编出 linux/amd64、linux/arm64 两个二进制到 profile/d18/bin/，用 file 检查是不是静态链接
+#   image        把 VERSION / REVISION 作为 --build-arg 传给 docker build
+#   image-size   打印镜像大小，超过 20MB 就失败（CI 里要用）
+
+# 版本 / 提交号 —— Dockerfile 也用这两个做 --build-arg
+VERSION   ?= $(IMAGE_TAG)
+REVISION  ?= $(GIT_SHA)
+LDFLAGS   = -s -w -X github.com/hzjconan/learn-program-language/go/internal/buildinfo.Version=$(VERSION)
+
+build:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o profile/d18/bin/api ./cmd/api
+
+build-cross:
+	mkdir -p profile/d18/bin
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o profile/d18/bin/api-linux-amd64 ./cmd/api
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o profile/d18/bin/api-linux-arm64 ./cmd/api
+	@echo "--- 静态链接检查 ---"
+	file profile/d18/bin/api-linux-amd64
+	file profile/d18/bin/api-linux-arm64
+	@echo "--- buildinfo 注入检查（linux/amd64）---"
+	go version -m profile/d18/bin/api-linux-amd64
+
 image:
-	docker build -t $(IMAGE) .
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg REVISION=$(REVISION) \
+		-t $(IMAGE) .
 	@echo "已构建 $(IMAGE)"
+
+image-size:
+	@SIZE=$$(docker image inspect $(IMAGE) --format '{{.Size}}') || exit 1; \
+	MB=$$(( SIZE / 1024 / 1024 )); \
+	echo "$(IMAGE) = $$SIZE bytes（约 $$MB MiB）"; \
+	if [ "$$SIZE" -ge 20971520 ]; then \
+		echo "❌ 镜像大小必须小于 20MiB（20971520 bytes）"; exit 1; \
+	fi; \
+	echo "✅ 通过"
 
 kind-load-image: image
 	kind load docker-image $(IMAGE) --name golearn

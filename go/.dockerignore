@@ -6,4 +6,6 @@
 coverage.out
 deploy/
 lessons/
+profile/
+operator/
 /api

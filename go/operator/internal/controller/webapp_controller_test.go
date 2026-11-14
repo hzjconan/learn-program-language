@@ -483,7 +483,9 @@ func TestReconcile_ConflictIsRequeuedNotError(t *testing.T) {
 	})
 	r := &WebAppReconciler{Client: c, Scheme: scheme.Scheme}
 
+	conflictsBefore := testutil.ToFloat64(conflictsTotal)
 	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(app)})
+	conflictsAfter := testutil.ToFloat64(conflictsTotal)
 
 	// ⭐ 先确认真的走到了要测的路径
 	if updates == 0 {
@@ -494,6 +496,10 @@ func TestReconcile_ConflictIsRequeuedNotError(t *testing.T) {
 	}
 	if res.RequeueAfter <= 0 {
 		t.Errorf("RequeueAfter = %v, want > 0（冲突后要稍后重试）", res.RequeueAfter)
+	}
+	if conflictsAfter-conflictsBefore != 1 {
+		t.Errorf("conflicts_total 差 = %v, want 1（Reconcile 入口检测到 IsConflict 时应该 +1）",
+			conflictsAfter-conflictsBefore)
 	}
 }
 
