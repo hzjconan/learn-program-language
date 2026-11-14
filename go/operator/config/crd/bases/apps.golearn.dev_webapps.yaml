@@ -66,7 +66,9 @@ spec:
                 type: object
               healthPath:
                 default: /healthz
-                description: healthPath 是 readiness 探针的路径。
+                description: |-
+                  healthPath 是 readiness 探针的路径。
+                  路径应由容器内的 HTTP 服务提供。
                 type: string
               image:
                 description: image 是容器镜像，含 tag。⚠️ 别用 latest（D19 §7 讨论过为什么）。
