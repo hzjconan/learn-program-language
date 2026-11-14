@@ -364,6 +364,8 @@ kind delete cluster --name golearn   # 收工
 
 ## 进度追踪
 
+**当前进度（2026-11-14）**：D18 已完成五个实践练习和 A/B 理解题讨论；下一课是 **D21 收尾、项目评审与面试模拟**。D18 的 CI 已验证三个 job 全绿，并完成生成文件检查红→绿实验。复习重点：动态加载器、UID 校验、Go 类型/生成 CRD/集群 CRD 的同步，以及滚动更新与镜像拉取策略的区别。
+
 - [x] D0 环境重建 —— go1.26.6 darwin/arm64 · golangci-lint v2.12.2 · `make check` 全绿
 - [x] D1 工程骨架与类型系统 —— `internal/units` 温度/数据量换算 · 具名类型 + iota + 表驱动测试 · `make check` 全绿
 - [x] D2 函数、指针、错误处理、defer —— `internal/kvconf` 带行号的配置解析器 + `internal/mathx` recover 练习 · `make check` 全绿
@@ -382,7 +384,7 @@ kind delete cluster --name golearn   # 收工
 - [ ] D15 测试进阶
 - [x] D16 可观测性
 - [x] D17 性能与内存
-- [ ] D18 构建与交付
+- [x] D18 构建与交付 —— buildinfo 日志与 /version、双架构静态二进制、约 13.9MiB 镜像、生产日志与冲突指标；本地 make check 通过，operator 测试/lint 通过，Actions 三个 job 全绿及生成物过期红→绿验证完成。双平台镜像与 CommitTime 注入为未做扩展，详见 notes/D18.md
 - [x] D19 云原生基础
 - [x] D20 Operator 实战
 - [ ] D21 收尾、面试模拟与路线规划

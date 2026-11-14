@@ -29,8 +29,10 @@
 | [D20](notes/D20.md) | 写一个 Operator | 09-16 → 09-28 |
 | [D16](notes/D16.md) | 可观测性：指标、pprof、trace | 09-29 → 10-15 |
 | [D17](notes/D17.md) | 性能与内存 | 10-15 → 10-17 |
-| [D18](notes/D18.md) | 构建与交付 | 10-17 |
+| [D18](notes/D18.md) | 构建与交付（已完成） | 10-17 备课；11-11 → 11-14 授课与验收 |
 
 执行顺序按 [LEARNING-PLAN §0'](LEARNING-PLAN.md)：D15 → D19 → D20 → D16 → D17 → D18 → D21。
+
+当前进度：**D18 已完成，下一课 D21（收尾、项目评审、面试模拟）**。实践验证及理解题反馈见 [D18 笔记](notes/D18.md)。
 
 配套：[`lessons/`](lessons/) 讲义 · [`QA.md`](QA.md) 问答手册（按编号） · [`MISTAKES.md`](MISTAKES.md) 错题本（按编号）

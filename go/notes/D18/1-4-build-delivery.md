@@ -97,3 +97,23 @@ Review 发现 Development 仍为 true，随后改为 false。make test lint 通�
 ### 2026-11-14 · 根据 review 修改 CI
 
 用户授权代改上述五处：operator 从 go.mod 选 Go 版本；纠正 git diff 注释；image-size 复用 Makefile 的字节检查；用 jq 断言 revision 等于 GITHUB_SHA；always 清理步骤先打印容器日志。远端 Actions 尚未验证。
+
+### 2026-11-14 · 提交推送与 Actions 验证
+
+提交前 make check 首次发现 strconv.ParseBool 的忽略错误违反 errcheck；改为 s.Value == "true" 并去掉 strconv 导入。随后 make check 通过，包括 lint（0 issues）、race 与 Docker 集成测试。
+
+提交 bf27e07 已推送 origin/main。[Actions 运行 43552745295](https://github.com/hzjconan/learn-program-language/actions/runs/43552745295) 总结果 success。逐项核对 steps，test 的单元/集成测试、operator 的重新生成/diff/测试/lint、image 的构建/大小检查/版本接口冒烟测试均 success，没有跳过关键步骤。
+
+练习⑤的首次成功运行已验证；讲义要求的“故意制造生成物过期，让 CI 红一次再恢复”实验尚未做。个人 A/B 思考题尚未作答，不将整课记为全部交作业完成。
+
+### 2026-11-14 · 生成文件过期的故障实验
+
+在临时分支 d18/generated-check-demo 给 WebAppSpec.HealthPath 的字段说明增加一句文字，不生成 CRD，提交 ffec387 并推送。
+
+[故障运行 43559941032](https://github.com/hzjconan/learn-program-language/actions/runs/43559941032)：test、image 成功，operator 失败。失败日志明确来自 Check generated code is up to date：git diff --exit-code 检测到 apps.golearn.dev_webapps.yaml 中 healthPath.description 多了一行，退出码 1。因此不是环境异常，也不是“测试碰巧红了”，而是生成文件检查确实发现了漏交产物。
+
+随后执行 make manifests generate，由工具生成 CRD 并提交 47313bd，推送触发[恢复运行 43560171591](https://github.com/hzjconan/learn-program-language/actions/runs/43560171591)。实验改动仅保留在临时分支，已切回 main，没有合并到课程主线。
+
+本题结论：只运行生成命令只能更新 CI 的临时工作区；必须随后检查差异，才能因“仓库提交的产物已过期”而失败。字段的普通说明注释也可能进入 CRD 的 description，并非只有 validation marker 才会改变生成物。
+
+恢复运行最终确认三个 job 全部成功：operator 1m7s、test 43s、image 47s。练习⑤的红→绿验证完成，A/B 思考题仍待用户作答。
