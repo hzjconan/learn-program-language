@@ -51,6 +51,7 @@ type WebAppSpec struct {
 	Port int32 `json:"port,omitempty"`
 
 	// healthPath 是 readiness 探针的路径。
+	// 路径应由容器内的 HTTP 服务提供。
 	// +kubebuilder:default="/healthz"
 	// +optional
 	HealthPath string `json:"healthPath,omitempty"`
