@@ -63,3 +63,11 @@ max_tokens 要求 >0，初版 <0 漏拒零；docs 默认写字符串而非列表
 ## M15 · JSON 解析错误的两种行号（P08）
 
 逐行解析时，`str(exc)` 包含传给 `json.loads` 的字符串内部行号。用 `enumerate(file, start=1)` 取实际文件行号，配合 `exc.msg` 记录错误原因。修订后第三行的错误返回 `(3, 'Expecting value')`。见 [P08](notes/P08.md)。
+
+## M16 · 导入绑定与共享对象的修改（P09）
+
+预测给 `settings.timeout` 重新赋值后，本地导入的 `timeout` 也会变化。`from settings import timeout` 在当前模块绑定导入当时取得的对象，模块属性后来可以指向别处。只要两个名字还指向同一个列表，`append` 修改的内容就会从两边看到。列表重新绑定后的变式已答对。见 [P09](notes/P09.md)。
+
+## M17 · 直接运行文件时的包上下文（P09）
+
+预测 `python demo/app.py` 也能执行 `from .settings import timeout`。直接运行这个脚本时缺少包上下文，首行相对导入会抛出 `ImportError`。从能找到包的目录执行 `python -m demo.app`，Python 就能解析 `.settings`。主练习通过模块入口和单独导入两项复测。见 [P09](notes/P09.md)。
