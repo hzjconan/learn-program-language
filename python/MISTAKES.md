@@ -71,3 +71,15 @@ max_tokens 要求 >0，初版 <0 漏拒零；docs 默认写字符串而非列表
 ## M17 · 直接运行文件时的包上下文（P09）
 
 预测 `python demo/app.py` 也能执行 `from .settings import timeout`。直接运行这个脚本时缺少包上下文，首行相对导入会抛出 `ImportError`。从能找到包的目录执行 `python -m demo.app`，Python 就能解析 `.settings`。主练习通过模块入口和单独导入两项复测。见 [P09](notes/P09.md)。
+
+## M18 · 把容器标注当作运行时检查（A01）
+
+原答 `tags: list[str]` 后调用 append(42) 会报错。普通列表不会根据标注检查元素，可得到 ['python', 42]；静态检查工具应报告类型不符。后续正确预测返回标注不转换整数，以及不符合 Literal/TypedDict 的字典普通执行仍输出123，复测通过。见 [A01](notes/A01.md)。
+
+## M19 · 分支语法与可选返回值（A01）
+
+处理 str | None 时原写 else if，Python 应使用 elif；已排除 None 时可直接 else。用户修订为 is None / else，并正确说明空字符串进入 else。收尾换场景正确指出对字符串作真假判断会把空字符串错误变成 None。见 [A01](notes/A01.md)。
+
+## M20 · 测试与实现共享字段拼写错误（A01）
+
+Message 声明 content，但构造函数及两处断言都写 contebt，原断言通过。教师按需求独立断言 content 字段时失败；用户修订三处后通过。期望值应独立依据契约；TypedDict 不自动在运行时拒绝结构错误。见 [A01](notes/A01.md)。
