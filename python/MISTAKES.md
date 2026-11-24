@@ -83,3 +83,11 @@ max_tokens 要求 >0，初版 <0 漏拒零；docs 默认写字符串而非列表
 ## M20 · 测试与实现共享字段拼写错误（A01）
 
 Message 声明 content，但构造函数及两处断言都写 contebt，原断言通过。教师按需求独立断言 content 字段时失败；用户修订三处后通过。期望值应独立依据契约；TypedDict 不自动在运行时拒绝结构错误。见 [A01](notes/A01.md)。
+
+## M21 · 混用数据类与校验模型的字段工具（A02）
+
+原 Ticket 没有继承 BaseModel，Literal 使用调用括号，tags 使用 dataclasses.field，也未补 strict/extra 配置。Pydantic 模型需继承 BaseModel，Literal 用方括号，模型字段用 Pydantic Field；model_config 是 BaseModel 识别的固定配置属性名。用户自行修订后，类定义、默认列表隔离及7组非法字段独立验证通过。见 [A02](notes/A02.md)。
+
+## M22 · 测试抛了预期异常，却没有触发目标规则（A02）
+
+原7组坏输入中的前6组缺 JSON 右花括号，虽然 pytest.raises(ValidationError) 全部通过，实际都触发 json_invalid，没有验证缺字段、空文本或类型规则。修订为合法 JSON 的单一字段错误，并参数化 raw/expected_loc、断言异常 errors() 的字段路径后，9项测试通过。列表元素路径包含索引，如 ("tags", 1)。见 [A02](notes/A02.md)。
