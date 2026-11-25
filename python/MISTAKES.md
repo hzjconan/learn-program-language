@@ -91,3 +91,11 @@ Message 声明 content，但构造函数及两处断言都写 contebt，原断�
 ## M22 · 测试抛了预期异常，却没有触发目标规则（A02）
 
 原7组坏输入中的前6组缺 JSON 右花括号，虽然 pytest.raises(ValidationError) 全部通过，实际都触发 json_invalid，没有验证缺字段、空文本或类型规则。修订为合法 JSON 的单一字段错误，并参数化 raw/expected_loc、断言异常 errors() 的字段路径后，9项测试通过。列表元素路径包含索引，如 ("tags", 1)。见 [A02](notes/A02.md)。
+
+## M23 · 参数收集的类型与实际传入值（A03）
+
+调用 total(10, 20, tax=0.1) 时，用户原答 args=[10, 20]、kwargs={tax: 0}。定义中的 *args 收集为 tuple，即 (10, 20)；**kwargs 收集为字符串键的 dict，即 {"tax": 0.1}，不会换成原函数的默认值。fn(args, kwargs) 是传两个容器，fn(*args, **kwargs) 才是解包转发。教师批改后，用户自行修正包装函数，注册练习与 limit 关键字专用参数预测通过；收集容器的类型与实际值仍在后续课程回访。见 [A03](notes/A03.md)。
+
+## M24 · 原函数算出结果不等于包装函数返回结果（A03）
+
+读错题只修正解包、未添加 return 时，用户原答输出33。原函数的计算结果会被丢弃，wrapper 正常执行到底返回 None。用户自行修正为 return fn(*args, **kwargs)，并准确解释外层 return wrapper 与内层返回结果的职责。换场景改为登记装饰器漏写 return fn，用户正确预测 None、6、直接调用报错，并说明名字绑定为 None，推理复测通过；主练习实际运行也验证了函数身份与返回值。见 [A03](notes/A03.md)。
