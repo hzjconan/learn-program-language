@@ -111,3 +111,11 @@ Message 声明 content，但构造函数及两处断言都写 contebt，原断�
 ## M27 · break 退出循环不等于关闭生成器（A05）
 
 原预测 open、piece A、close、inside、outside，并回答 close 在 break 时打印。break 只退出 for，仍需执行 with 内的 inside；离开 with 时 closing 才调用生成器close，执行finally打印close。用户修订输出为 open、piece A、inside、close、outside，并正确解释两层作用域。用户独立测试实际验证提前退出 closing 后来源关闭且没有预读；最终改为消费者抛 ValueError，用户正确预测 delta、source closed、caught，且不会产出后续片段或done，清理链复测通过。见 [A05](notes/A05.md)。
+
+## M28 · 默认create_task提交调度不等于立即执行函数体（A06）
+
+原预测start A、start B、end A、end B、created、a、b，并解释create_task后立即运行。Python 3.12默认任务工厂下先排队，main继续打印created，在等待未完成的A时才让出控制权；后续输出start A、start B、end A、end B、a、b。用户修订完整顺序并解释提交调度后当前main继续执行；主实现及交错执行测试通过。最终对已完成Task重复await的题目也正确指出只取结果、不重跑函数体、不因该等待让出。后续A07回访任务启动时机。见 [A06](notes/A06.md)。
+
+## M29 · 调用参数先求值，空输入分支不能绕过未定义名字（A06）
+
+原测试run_jobs([], demo_worker)，测试模块没有定义或导入demo_worker，实际NameError发生在调用run_jobs之前。用户改为测试本地的async worker，一旦执行则抛AssertionError，空输入返回[]且测试通过。另补测试覆盖缺口：原全部worker仅sleep(0)一次，完成顺序与输入相同，难以识别误按完成顺序返回；修订让A额外等待并断言B、C先完成，结果仍['a', 'b', 'c']，最终两项测试通过。见 [A06](notes/A06.md)。
