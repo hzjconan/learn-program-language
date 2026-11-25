@@ -106,4 +106,8 @@ Message 声明 content，但构造函数及两处断言都写 contebt，原断�
 
 ## M26 · yield 产出值与消费者打印结果混淆（A04）
 
-原预测 print(list(g)) 的一段输出是20、end，漏掉恢复后的 between，也未把20写成列表。yield 20 只向 list 提供元素；list 会继续索取到耗尽，期间先打印 between 和 end，之后返回 [20]，外层 print 最后才打印列表。用户修订完整输出并正确解释 end 为何先出现；主练习按批产出与惰性读取验证通过。后续 A05 继续换场景回访副作用执行顺序。见 [A04](notes/A04.md)。
+原预测 print(list(g)) 的一段输出是20、end，漏掉恢复后的 between，也未把20写成列表。yield 20 只向 list 提供元素；list 会继续索取到耗尽，期间先打印 between 和 end，之后返回 [20]，外层 print 最后才打印列表。用户修订完整输出并正确解释 end 为何先出现；主练习按批产出与惰性读取验证通过。A05 两级生成器变式又漏写 print(next(stream)) 的外层 A 输出，教师指出内部 keep A 与外层 A 属于不同打印后，用户补齐完整输出并解释 list 收集片段的过程，修订通过；增量事件与中途失败预测也通过。见 [A04](notes/A04.md)、[A05](notes/A05.md)。
+
+## M27 · break 退出循环不等于关闭生成器（A05）
+
+原预测 open、piece A、close、inside、outside，并回答 close 在 break 时打印。break 只退出 for，仍需执行 with 内的 inside；离开 with 时 closing 才调用生成器close，执行finally打印close。用户修订输出为 open、piece A、inside、close、outside，并正确解释两层作用域。用户独立测试实际验证提前退出 closing 后来源关闭且没有预读；最终改为消费者抛 ValueError，用户正确预测 delta、source closed、caught，且不会产出后续片段或done，清理链复测通过。见 [A05](notes/A05.md)。
