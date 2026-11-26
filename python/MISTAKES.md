@@ -119,3 +119,19 @@ Message 声明 content，但构造函数及两处断言都写 contebt，原断�
 ## M29 · 调用参数先求值，空输入分支不能绕过未定义名字（A06）
 
 原测试run_jobs([], demo_worker)，测试模块没有定义或导入demo_worker，实际NameError发生在调用run_jobs之前。用户改为测试本地的async worker，一旦执行则抛AssertionError，空输入返回[]且测试通过。另补测试覆盖缺口：原全部worker仅sleep(0)一次，完成顺序与输入相同，难以识别误按完成顺序返回；修订让A额外等待并断言B、C先完成，结果仍['a', 'b', 'c']，最终两项测试通过。见 [A06](notes/A06.md)。
+
+## M30 · await不必然切换，暂停也不释放许可（A07）
+
+原Semaphore题先写完wait A/B/C再enter A/B；可用许可可立即获取，A到sleep(0)才让出执行机会，且仍持有许可。用户追问“让出”是否让出sem，教师澄清执行机会与许可不同，用户后续修订任务顺序正确，gather结果列表格式亦已纠正。队列题再把ready放末尾、get A放put begin B前；main提交Task后先打印ready，put A有空位可直接完成，生产者继续打印put begin B，直到put B才等待。用户修订完整队列输出通过，实际编码运行符合预期。见 [A07](notes/A07.md)。
+
+## M31 · 测试别名与只在发生异常时断言的缺口（A07）
+
+原用names2=names后断言相等与同一对象，无法发现原地修改；try/except仅在抛ValueError时检查，未强制非法limit必须抛错，limit=0直接返回[]仍可通过。教师在独立进程换入错误接受0和原地反转输入的实现，确认测试均会放过，未修改用户文件。用户修订为copy快照、pytest.raises、恢复结果断言，补空输入非法上限和异常路径statistics()==(0, 0)，限并发7项通过。队列测试同样补齐空输入非法参数和执行即失败的worker，11项通过。见 [A07](notes/A07.md)。
+
+## M32 · asyncio.Lock需异步上下文管理协议（A07）
+
+用户圈定完整读改写范围正确，但写with lock；实际抛TypeError，Lock不支持同步上下文管理协议。async with使用异步进入/退出，获取锁可能等待；普通closing等同步管理器在async def内仍用with，不能只根据外层函数是否async决定。用户自行修订为async with lock，运行read A 0、write A 1、read B 1、write B 2、count 2，通过。见 [A07](notes/A07.md)。
+
+## M33 · 仅在成功get之后完成记账（A07）
+
+原队列消费者把await q.get放进try，finally无条件task_done；若get尚未成功即被中断，会为未取得的项误记完成。用户将get移到try之前，之后每次成功取得的数据与结束信号都经过finally记账，队列11项通过。最终用户正确预测empty True、joined False、joined True，并解释get腾容量不等于处理完成，完成记账复测通过。取消与失败生命周期留A08验证，未声称本课已执行取消实验。见 [A07](notes/A07.md)。
